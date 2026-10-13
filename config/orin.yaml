@@ -1,4 +1,4 @@
-# Orin 쪽 설정: 카메라만. 같은 바이너리를 쓴다.
+# Orin 쪽 설정: Orin 에 와치독을 직접 올리는 경우에만 쓴다. (IPC 에서 SSH 로 재시작하는 기본 구성에서는 불필요)
 # 실행: ros2 run sensor_watchdog watchdog_node --ros-args -r __node:=watchdog_orin --params-file orin.yaml
 
 /**:

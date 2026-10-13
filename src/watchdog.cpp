@@ -9,7 +9,7 @@
 //   6. systemd에 WATCHDOG=1 핑, MCU에 UDP 하트비트
 //   7. 모든 행동과 복구 시간을 events.csv 에 남긴다
 //
-// 각 장비(IPC, Orin)가 자기 센서만 감시한다. SSH 없음.
+// 와치독은 IPC 에 하나만 둔다. 원격 장비의 센서는 systemctl_cmd 를 SSH 로 지정해 그 장비의 systemd 를 호출한다.
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialized_message.hpp>
@@ -204,6 +204,7 @@ struct Sensor
     std::string lifecycle_node;
     std::string unit;
     std::vector<std::string> power_cmd;
+    std::vector<std::string> systemctl_cmd;   // 비어 있으면 전역 systemctl_cmd 사용
 
     Health health;
     Ladder ladder;
@@ -415,6 +416,11 @@ private:
         s->unit = unit;
         s->power_cmd = power_cmd;
 
+        // 센서별 재시작 명령 앞부분. 원격 장비의 유닛이면
+        // ["ssh", "-o", "BatchMode=yes", "orin", "systemctl", "--user"] 처럼 준다.
+        s->systemctl_cmd = param<std::vector<std::string>>(
+            id, "systemctl_cmd", std::vector<std::string>{});
+
         if (s->topic.empty() || s->topic.front() != '/')
             throw std::runtime_error(id + ": topic must start with '/'");
         if (s->type.empty())
@@ -544,7 +550,8 @@ private:
 
         case Step::SERVICE: {
             std::vector<std::string> cmd = {"timeout", "--signal=TERM", "--kill-after=5s", timeout_s};
-            cmd.insert(cmd.end(), systemctl_cmd_.begin(), systemctl_cmd_.end());
+            const auto &prefix = s.systemctl_cmd.empty() ? systemctl_cmd_ : s.systemctl_cmd;
+            cmd.insert(cmd.end(), prefix.begin(), prefix.end());
             cmd.push_back("restart");
             cmd.push_back(s.unit);
             a.describe = "restart " + s.unit;

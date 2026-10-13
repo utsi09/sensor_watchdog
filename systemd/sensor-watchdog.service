@@ -1,4 +1,4 @@
-# ~/.config/systemd/user/sensor-watchdog.service  (IPC, Orin 둘 다)
+# ~/.config/systemd/user/sensor-watchdog.service  (IPC. Orin 에 와치독을 따로 올릴 때만 Orin 에도)
 # 와치독 노드 자체를 systemd 가 감시한다. 5초 안에 WATCHDOG=1 알림이 없으면 종료 후 재시작한다.
 [Unit]
 Description=Sensor watchdog

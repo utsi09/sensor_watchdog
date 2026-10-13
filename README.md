@@ -3,7 +3,7 @@
 ROS 2 Humble 용 센서 감시·자동 복구 노드입니다. 라이다, GPS, 카메라 같은 센서 토픽이 끊기면 알아채고, 정해진 조건에서만 센서 프로세스를 껐다 켜며, 센서 상태를 `/diagnostics` 로 계속 알립니다.
 
 - 센서 프로세스 관리는 리눅스 기본 관리자인 **systemd** 에 맡깁니다. 별도 셸 스크립트 없음.
-- 장비마다 자기 센서만 감시합니다. 원격 장비(Jetson Orin 등)에 SSH 로 들어가지 않습니다.
+- 와치독은 IPC 한 대에만 올립니다. 원격 장비(Jetson Orin 등)의 센서는 SSH 로 그 장비의 systemd 를 호출해 재시작합니다. 원격 장비엔 빌드가 필요 없습니다.
 - 처음엔 **감지 전용 모드**(`dry_run: true`)로 돌려서 오탐이 얼마나 되는지 확인한 뒤에 실제 재시작을 켭니다.
 
 > 상태: 판정 로직은 단위 테스트를 통과했습니다. 실제 ROS 2 Humble 빌드와 실차 검증은 아직 하지 않았습니다. 자세한 건 [검증 범위](#검증-범위와-한계) 참고.
@@ -22,11 +22,12 @@ ROS 2 Humble 용 센서 감시·자동 복구 노드입니다. 라이다, GPS, �
 8. [동작 원리 자세히](#동작-원리-자세히)
 9. [설정 레퍼런스](#설정-레퍼런스)
 10. [실제 재시작을 켜기 전 절차](#실제-재시작을-켜기-전-절차)
-11. [안전 게이트 설정](#안전-게이트-설정)
-12. [안전 MCU 하트비트](#안전-mcu-하트비트)
-13. [자주 묻는 질문](#자주-묻는-질문)
-14. [테스트](#테스트)
-15. [검증 범위와 한계](#검증-범위와-한계)
+11. [원격 장비를 SSH 로 재시작하기](#원격-장비를-ssh-로-재시작하기)
+12. [안전 게이트 설정](#안전-게이트-설정)
+13. [안전 MCU 하트비트](#안전-mcu-하트비트)
+14. [자주 묻는 질문](#자주-묻는-질문)
+15. [테스트](#테스트)
+16. [검증 범위와 한계](#검증-범위와-한계)
 
 ---
 
@@ -75,24 +76,25 @@ ROS 2 Humble 용 센서 감시·자동 복구 노드입니다. 라이다, GPS, �
 │                                                             │
 │   systemd ─┬─ lidar.service     (ros2 launch ... 라이다)    │
 │            ├─ rtk-gps.service   (ros2 launch ... GPS)       │
-│            └─ sensor-watchdog.service                       │
-│                   │  watchdog_ipc, ipc.yaml                  │
-│                   ├─ 라이다·GPS 토픽 구독                     │
+│            └─ sensor-watchdog.service  (ipc.yaml)           │
+│                   ├─ 라이다·GPS·카메라 토픽 구독 (DDS)        │
 │                   ├─ /diagnostics 발행 ──────▶ 플래너        │
 │                   ├─ 게이트 토픽 구독 (예: /ad_can/gear)      │
-│                   └─ UDP 하트비트 ───────────▶ 안전 MCU      │
-└─────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────┐
-│ Orin (192.168.x.x)                                          │
-│                                                             │
-│   systemd ─┬─ cam.service       (ros2 launch ... 카메라)    │
-│            └─ sensor-watchdog.service                       │
-│                   watchdog_orin, orin.yaml  (같은 바이너리)  │
-└─────────────────────────────────────────────────────────────┘
+│                   ├─ UDP 하트비트 ───────────▶ 안전 MCU      │
+│                   ├─ 라이다·GPS 재시작: systemctl --user ... │
+│                   └─ 카메라 재시작: ssh orin systemctl ... ──┐
+└──────────────────────────────────────────────────────────────┼──┘
+                                                               │
+┌──────────────────────────────────────────────────────────────▼──┐
+│ Orin  (빌드 불필요. 서비스 파일 하나와 SSH 키 등록만)            │
+│                                                                 │
+│   systemd ─── cam.service       (ros2 launch ... 카메라)        │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-IPC 와 Orin 은 서로 들어가지 않습니다. 각자 자기 센서만 봅니다. 두 와치독의 `/diagnostics` 는 같은 DDS 도메인이라 한 곳에서 다 보입니다.
+와치독은 IPC 에 하나만 돕니다. 카메라 토픽은 DDS 로 IPC 에서 보이니까 감시는 그대로 되고, 재시작할 때만 SSH 로 Orin 의 systemd 를 호출합니다. 차량 내부 이더넷 스위치처럼 안정적인 망을 전제로 한 구성입니다.
+
+Orin 에도 와치독을 따로 올리고 싶다면(망이 불안정하거나 SSH 키를 두기 싫을 때) `config/orin.yaml` 을 쓰면 됩니다. [자주 묻는 질문](#자주-묻는-질문) 참고.
 
 ---
 
@@ -106,8 +108,8 @@ sensor_watchdog/
 ├── src/watchdog.cpp        ROS 노드. 구독, /diagnostics 발행, systemctl 호출, 기록
 ├── test/test_health.cpp    ROS 없이 돌아가는 단위 테스트
 ├── config/
-│   ├── ipc.yaml            IPC 용 (lidar, gps)
-│   └── orin.yaml           Orin 용 (camera)
+│   ├── ipc.yaml            IPC 용 (lidar, gps, camera). 기본 구성
+│   └── orin.yaml           Orin 에 와치독을 따로 올릴 때만
 ├── systemd/
 │   ├── lidar.service       센서 런치를 systemd 서비스로
 │   ├── rtk-gps.service
@@ -136,7 +138,7 @@ ros2 topic info /토픽이름 --verbose       # QoS (Reliability, Durability)
 ros2 topic hz /토픽이름                   # 주기
 ```
 
-### 1. 빌드 (IPC, Orin 둘 다)
+### 1. 빌드 (IPC 에서만)
 
 ```bash
 sudo apt install -y build-essential python3-colcon-common-extensions \
@@ -160,8 +162,8 @@ mkdir -p ~/.config/sensor_watchdog ~/.config/systemd/user
 cd ~/watchdog_ws/src/sensor_watchdog
 
 cp scripts/env.bash.example ~/.config/sensor_watchdog/env.bash
-cp config/ipc.yaml          ~/.config/sensor_watchdog/watchdog.yaml   # Orin 이면 orin.yaml
-cp systemd/*.service        ~/.config/systemd/user/
+cp config/ipc.yaml          ~/.config/sensor_watchdog/watchdog.yaml
+cp systemd/lidar.service systemd/rtk-gps.service systemd/sensor-watchdog.service ~/.config/systemd/user/
 ```
 
 ### 3. 빈칸 채우기 (세 파일)
@@ -222,13 +224,78 @@ systemctl --user enable lidar rtk-gps sensor-watchdog
 
 자동 시작이 싫으면 `enable` 을 하지 않고 매번 `start` 만 쓰면 됩니다.
 
-### Orin 은?
+### 7. Orin 쪽 준비 (빌드 없음)
 
-1~6 을 똑같이 하되 `config/orin.yaml` 과 `cam.service` 를 쓰고, `sensor-watchdog.service` 안의 `NODE=watchdog_ipc` 를 `NODE=watchdog_orin` 으로 바꿉니다.
+Orin 에는 카메라 서비스 파일과 환경 파일만 둡니다.
 
 ```bash
-sed -i 's/NODE=watchdog_ipc/NODE=watchdog_orin/' ~/.config/systemd/user/sensor-watchdog.service
+# Orin 에서
+mkdir -p ~/.config/sensor_watchdog ~/.config/systemd/user
+# env.bash 와 cam.service 를 IPC 에서 scp 로 복사하거나 직접 작성
+nano ~/.config/sensor_watchdog/env.bash       # Orin 의 ROS·카메라 워크스페이스 환경
+nano ~/.config/systemd/user/cam.service       # ExecStart 에 카메라 런치 명령
+systemctl --user daemon-reload
+loginctl enable-linger $USER                  # SSH 로 systemctl --user 를 쓰려면 필수
+systemctl --user start cam
 ```
+
+그다음 IPC 에서 Orin 으로 SSH 가 비밀번호 없이 되게 합니다. [원격 장비를 SSH 로 재시작하기](#원격-장비를-ssh-로-재시작하기) 참고.
+
+---
+
+## 원격 장비를 SSH 로 재시작하기
+
+IPC 의 와치독이 카메라 재시작을 위해 실행하는 명령은 이것입니다 (`ipc.yaml` 의 `camera.systemctl_cmd`).
+
+```
+ssh -o BatchMode=yes -o ConnectTimeout=3 orin systemctl --user restart cam.service
+```
+
+이게 사람 개입 없이 되려면 세 가지가 필요합니다.
+
+### 1. IPC 의 SSH 설정에 별칭 등록
+
+```bash
+# IPC 에서
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+cat >> ~/.ssh/config <<'EOF'
+Host orin
+    HostName ORIN_IP          # Orin 주소
+    User ORIN_USER                  # Orin 계정
+    IdentityFile ~/.ssh/id_watchdog
+EOF
+```
+
+### 2. 전용 키 만들고 Orin 에 등록
+
+```bash
+# IPC 에서. 암호구문 없이 (자동 실행용)
+ssh-keygen -t ed25519 -f ~/.ssh/id_watchdog -N "" -C "watchdog@ipc"
+ssh-copy-id -i ~/.ssh/id_watchdog.pub orin
+ssh -o BatchMode=yes orin 'echo SSH_OK'      # SSH_OK 가 나와야 함
+```
+
+### 3. Orin 에서 그 키의 권한을 재시작 명령 하나로 제한
+
+암호 없는 키는 그 자체로 Orin 쉘을 여는 열쇠입니다. 이 키로는 카메라 재시작밖에 못 하게 묶어 둡니다. Orin 의 `~/.ssh/authorized_keys` 에서 방금 등록된 줄(`watchdog@ipc` 로 끝나는 줄) 맨 앞에 다음을 붙입니다.
+
+```
+command="systemctl --user restart cam.service",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... watchdog@ipc
+```
+
+이렇게 하면 IPC 가 어떤 명령을 보내든 Orin 은 `systemctl --user restart cam.service` 만 실행합니다. 확인:
+
+```bash
+# IPC 에서
+ssh -o BatchMode=yes orin 'ls'               # ls 가 아니라 재시작이 실행돼야 정상
+ssh -o BatchMode=yes orin 'whoami'           # 역시 재시작만 됨
+```
+
+### 알아둘 것
+
+- Orin 이 재설치되면 호스트 키가 바뀌어 SSH 가 조용히 실패합니다. 와치독 로그에 `action done exit=255` 가 반복되면 이 경우입니다. IPC 에서 `ssh-keygen -R ORIN_IP` 후 다시 접속해 호스트 키를 받으면 됩니다.
+- IPC ↔ Orin 망이 끊기면 카메라 토픽도 끊기고 SSH 도 안 됩니다. 와치독은 카메라 고장으로 보고 재시작을 시도하다 실패하고, 라이다·GPS 가 함께 끊기면 `BLOCKED_COMMON_CAUSE` 로 멈춥니다.
+- SSH 가 걸리는 시간만큼 복구가 늦어집니다. `ConnectTimeout=3` 이라 최악 3초 추가입니다.
 
 ---
 
@@ -238,6 +305,7 @@ sed -i 's/NODE=watchdog_ipc/NODE=watchdog_orin/' ~/.config/systemd/user/sensor-w
 |---|---|
 | 센서 켜기 | `systemctl --user start lidar` |
 | 센서 끄기 | `systemctl --user stop sensor-watchdog` 먼저, 그다음 `systemctl --user stop lidar` |
+| 카메라 켜고 끄기 | Orin 에서 `systemctl --user start cam` / `stop cam` |
 | 센서 껐다 켜기 | `systemctl --user restart lidar` |
 | 살아 있나 | `systemctl --user status lidar` |
 | 센서 로그 | `journalctl --user -u lidar -f` |
@@ -423,6 +491,7 @@ values: fault, state, rx_hz, age_sec, rx_count, step, attempts_at_step, total_ac
 | `lifecycle_node` | `""` | lifecycle 노드 이름. 설정 시 사다리에 lifecycle 칸 포함 |
 | `unit` | `""` | systemd 유닛 이름. 설정 시 service 칸 포함 |
 | `power_cmd` | 없음 | 전원 리셋 명령 배열. 설정 시 power 칸 포함. 빈 배열 `[]` 은 쓰지 말고 줄을 지울 것 |
+| `systemctl_cmd` | 없음 | 이 센서만 쓸 재시작 명령 앞부분. 원격 장비면 `["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "orin", "systemctl", "--user"]`. 없으면 전역 값 |
 | `timeout_sec` | `1.0` | 이 시간 메시지 없으면 RX_TIMEOUT |
 | `stamp_timeout_sec` | `1.0` | 타임스탬프가 이 시간 안 바뀌면 STAMP_NOT_ADVANCING |
 | `min_hz` | `0.0` | 수신 주기 하한. 0 이면 검사 안 함 |
@@ -532,6 +601,10 @@ MCU 는 IPC 에 묻지 않고 스스로 판단합니다. 지키는 쪽이 지켜
 
 **부팅 시 자동으로 안 띄우고 싶어요.**
 `enable` 을 하지 않고 `start` 만 쓰면 됩니다. 이미 했다면 `systemctl --user disable lidar`. 죽었을 때 되살아나는 것도 끄려면 유닛 파일에서 `Restart=no`.
+
+**Orin 에도 와치독을 올려야 하나요?**
+기본 구성에서는 아닙니다. IPC 의 와치독이 카메라 토픽을 DDS 로 보고, 재시작만 SSH 로 Orin 의 systemd 를 호출합니다. Orin 엔 `cam.service` 와 SSH 키 등록만 있으면 됩니다.
+망이 불안정하거나 IPC 에 SSH 키를 두기 싫다면 Orin 에서도 빌드해서 `config/orin.yaml` 로 띄우면 됩니다. 그 경우 `ipc.yaml` 에서 `camera` 항목을 지우고, Orin 의 `sensor-watchdog.service` 에서 `NODE=watchdog_orin` 으로 바꿉니다. 두 와치독의 `/diagnostics` 는 같은 DDS 도메인이라 한 곳에서 다 보입니다.
 
 **와치독을 끄면 센서도 꺼지나요?**
 아니요. 와치독은 감시만 합니다. 센서는 systemd 가 들고 있어서 그대로 돕니다.

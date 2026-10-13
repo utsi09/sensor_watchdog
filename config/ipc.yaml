@@ -1,4 +1,5 @@
-# IPC 쪽 설정: lidar, gps 만 감시한다. 카메라는 Orin이 자기 것을 감시한다.
+# IPC 쪽 설정: lidar, gps 는 로컬 systemd 로, camera 는 SSH 로 Orin 의 systemd 를 호출해 재시작한다.
+# (Orin 에 와치독을 따로 올리려면 camera 항목을 지우고 orin.yaml 을 쓴다.)
 # /**: 는 노드 이름이 뭐든 적용된다는 뜻. (-r __node:=watchdog_ipc 로 띄워도 됨)
 #
 # CHANGE_ME 는 반드시 실제 값으로 바꿔야 한다. 확인 명령:
@@ -71,7 +72,7 @@
     #   power     : 센서별 power_cmd 가 설정된 경우만
     ladder: ["lifecycle", "service", "power"]
 
-    sensors: ["lidar", "gps"]
+    sensors: ["lidar", "gps", "camera"]
 
     lidar:
       topic: /CHANGE_ME_LIDAR_TOPIC
@@ -109,6 +110,29 @@
       check_stamp_progress: true
       check_stamp_age: false
       max_age_sec: 2.0
+      qos:
+        reliability: best_effort
+        durability: volatile
+        depth: 5
+
+    camera:
+      topic: /CHANGE_ME_CAMERA_TOPIC
+      type: sensor_msgs/msg/CompressedImage     # 실제 타입으로. Image 면 그대로 바꾼다
+      node_name: ""
+      lifecycle_node: ""
+      unit: cam.service
+      # Orin 의 systemd 를 SSH 로 호출한다. "orin" 은 ~/.ssh/config 의 Host 별칭.
+      # README "원격 장비를 SSH 로 재시작하기" 의 키 제한 설정을 반드시 할 것.
+      systemctl_cmd: ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "orin", "systemctl", "--user"]
+
+      timeout_sec: 1.0
+      stamp_timeout_sec: 1.0
+      min_hz: 5.0
+      hz_window_sec: 5.0
+      min_bytes: 1
+      check_stamp_progress: true
+      check_stamp_age: false
+      max_age_sec: 0.5
       qos:
         reliability: best_effort
         durability: volatile

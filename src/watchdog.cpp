@@ -277,7 +277,7 @@ public:
         act_on_faults_slow_ = declare_parameter<std::vector<std::string>>(
             "act_on_faults_slow",
             std::vector<std::string>{"LOW_RX_HZ", "STAMP_NOT_ADVANCING", "STAMP_INVALID_OR_BACKWARD"});
-        slow_fault_hold_ = declare_parameter<double>("slow_fault_hold_sec", 10.0);
+        slow_fault_hold_ = declare_parameter<double>("slow_fault_hold_sec", 5.0);
 
         for (const auto *list : {&act_on_faults_, &act_on_faults_slow_}) {
             for (const auto &name : *list) {
@@ -828,7 +828,7 @@ private:
     std::vector<std::string> systemctl_cmd_;
     std::vector<std::string> act_on_faults_;
     std::vector<std::string> act_on_faults_slow_;
-    double slow_fault_hold_ = 10.0;
+    double slow_fault_hold_ = 5.0;
 
     bool gate_value_ = false;
     uint64_t gate_last_value_ = 0;

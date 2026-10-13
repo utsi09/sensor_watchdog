@@ -61,7 +61,7 @@
     act_on_faults: ["RX_TIMEOUT", "NO_PUBLISHER", "NODE_NOT_VISIBLE"]
     # 애매한 고장(주기 저하, 타임스탬프 정지·역행). 이만큼 계속돼야 재시작. 잠깐 튀는 건 무시.
     act_on_faults_slow: ["LOW_RX_HZ", "STAMP_NOT_ADVANCING", "STAMP_INVALID_OR_BACKWARD"]
-    slow_fault_hold_sec: 10.0
+    slow_fault_hold_sec: 5.0
     # 행동 완료 후 다음 행동까지 최소 간격
     cooldown_sec: 30.0
     # 같은 칸을 몇 번 시도하고 다음 칸으로

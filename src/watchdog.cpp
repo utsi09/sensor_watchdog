@@ -806,7 +806,7 @@ private:
     bool gate_reliable_ = true;
     double gate_timeout_ = 1.0;
     double gate_bypass_after_ = 5.0;
-    int common_cause_min_ = 2;
+    int common_cause_min_ = 3;
     double common_cause_window_ = 3.0;
     double action_timeout_ = 30.0;
     std::vector<std::string> systemctl_cmd_;

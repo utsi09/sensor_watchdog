@@ -253,7 +253,7 @@ public:
             throw std::runtime_error("gate_field_bytes must be 1, 2, 4 or 8");
         }
 
-        common_cause_min_ = declare_parameter<int>("common_cause_min", 2);
+        common_cause_min_ = declare_parameter<int>("common_cause_min", 3);
         common_cause_window_ = declare_parameter<double>("common_cause_window_sec", 3.0);
 
         action_timeout_ = declare_parameter<double>("action_timeout_sec", 30.0);

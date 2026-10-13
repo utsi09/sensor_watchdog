@@ -38,7 +38,7 @@
     gate_bypass_after_sec: 2.0
 
     # 이 개수 이상의 센서가 이 시간 안에 함께 죽으면 센서 탓이 아니라고 보고 행동하지 않는다.
-    common_cause_min: 2
+    common_cause_min: 3
     common_cause_window_sec: 3.0
 
     # 한 행동(systemctl/power 스크립트/lifecycle)에 허용하는 최대 시간

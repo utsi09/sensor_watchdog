@@ -402,7 +402,7 @@ sensor_msgs 의 PointCloud2, Image, CompressedImage, NavSatFix, Imu 모두 첫 �
 `ACT` 판정이 나도 바로 재시작하지 않습니다.
 
 1. **고장 종류가 `act_on_faults` 에 있는가.** 기본은 `RX_TIMEOUT`, `NO_PUBLISHER`, `NODE_NOT_VISIBLE` 세 가지. 나머지는 `MONITOR_ONLY`.
-2. **공통 원인이 아닌가.** `common_cause_window_sec`(3초) 안에 `common_cause_min`(2개) 이상 센서가 함께 죽었으면 `BLOCKED_COMMON_CAUSE`. 네트워크나 호스트 문제에 센서를 재시작해 봐야 소용없기 때문입니다.
+2. **공통 원인이 아닌가.** `common_cause_window_sec`(3초) 안에 `common_cause_min`(3개) 이상 센서가 함께 죽었으면 `BLOCKED_COMMON_CAUSE`. 네트워크나 호스트 문제에 센서를 재시작해 봐야 소용없기 때문입니다.
 3. **안전 게이트가 허용했는가.** `gate_topic` 을 설정하면 그 값(예: 기어 P)이 맞을 때만. 단, 고장이 `gate_bypass_after_sec` 이상 계속되면 게이트를 무시합니다. 기본값은 `fault_hold_sec` 와 같아서 "확실히 끊긴 센서는 기어와 무관하게 재시작"됩니다.
 4. **`dry_run` 이 꺼져 있는가.** 켜져 있으면 `DRY_RUN_WOULD_*` 만 기록.
 
@@ -466,7 +466,7 @@ values: fault, state, rx_hz, age_sec, rx_count, step, attempts_at_step, total_ac
 | `gate_reliable` | `true` | 게이트 구독 QoS |
 | `gate_timeout_sec` | `1.0` | 이 시간 안에 게이트 메시지가 와야 유효 |
 | `gate_bypass_after_sec` | `2.0` | 고장이 이만큼 지속되면 게이트 무시. 음수면 항상 게이트 따름 |
-| `common_cause_min` | `2` | 이 개수 이상 동시 고장이면 공통 원인 |
+| `common_cause_min` | `3` | 이 개수 이상 동시 고장이면 공통 원인 |
 | `common_cause_window_sec` | `3.0` | "동시"의 기준 |
 | `action_timeout_sec` | `30.0` | 한 행동에 허용하는 최대 시간 |
 | `systemctl_cmd` | `["systemctl", "--user"]` | 서비스 재시작 명령 앞부분. 시스템 유닛이면 `["sudo", "-n", "systemctl"]` |

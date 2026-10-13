@@ -1,0 +1,71 @@
+# Orin 쪽 설정: 카메라만. 같은 바이너리를 쓴다.
+# 실행: ros2 run sensor_watchdog watchdog_node --ros-args -r __node:=watchdog_orin --params-file orin.yaml
+
+/**:
+  ros__parameters:
+    use_sim_time: false
+    dry_run: true
+    raw_log_dir: "~/.local/state/sensor_watchdog"
+
+    # 안전 게이트: 이 토픽의 첫 정수 필드가 gate_ok_value 와 같을 때만 복구 행동을 허용한다.
+    # 예) /ad_can/gear 의 기어 값이 P(파킹)일 때만 재시작.
+    #   gate_type       : ros2 topic type /ad_can/gear
+    #   gate_has_header : ros2 interface show <타입> 첫 줄이 std_msgs/Header 면 true
+    #   gate_field_bytes: 헤더 다음 첫 필드 크기. bool/int8/uint8=1, int16=2, int32=4, int64=8
+    #   gate_ok_value   : 허용 값 (P 에 해당하는 숫자)
+    # gate_topic 을 "" 로 두면 항상 허용 (벤치 시험용). 실차에서는 반드시 설정한다.
+    gate_topic: ""
+    gate_type: std_msgs/msg/Bool
+    gate_has_header: false
+    gate_field_bytes: 1
+    gate_ok_value: 1
+    gate_reliable: true
+    gate_timeout_sec: 1.0
+    # 고장이 이 시간 이상 계속되면 게이트를 무시하고 바로 복구한다. 기본값은 fault_hold_sec 와 같아서
+    # "확실히 끊긴 센서"는 기어와 무관하게 재시작된다. 기어를 기다리게 하려면 이 값을 키운다.
+    # 짧은 끊김(오탐)만 게이트가 막는다. 음수면 항상 게이트를 따른다.
+    gate_bypass_after_sec: 2.0
+
+    # 센서가 하나뿐이라 공통 원인 판정은 사실상 비활성(2개 이상 필요)
+    common_cause_min: 2
+    common_cause_window_sec: 3.0
+
+    action_timeout_sec: 30.0
+    systemctl_cmd: ["systemctl", "--user"]
+
+    heartbeat_host: ""
+    heartbeat_port: 5006
+
+    startup_grace_sec: 10.0
+    fault_hold_sec: 2.0
+
+    # 복구 행동을 하는 고장 종류. "확실히 끊긴" 경우만. 나머지(주기 저하, stamp 이상, 크기 이상)는 기록·보고만.
+    act_on_faults: ["RX_TIMEOUT", "NO_PUBLISHER", "NODE_NOT_VISIBLE"]
+    cooldown_sec: 30.0
+    attempts_per_step: 2
+    healthy_reset_sec: 600.0
+
+    ladder: ["lifecycle", "service", "power"]
+
+    sensors: ["camera"]
+
+    camera:
+      topic: /CHANGE_ME_CAMERA_TOPIC
+      type: sensor_msgs/msg/CompressedImage     # 실제 타입으로. Image 면 그대로 바꾼다
+      node_name: ""
+      lifecycle_node: ""
+      unit: cam.service
+      # power_cmd: ["/home/USER/.local/bin/power_cycle.sh"]
+
+      timeout_sec: 1.0
+      stamp_timeout_sec: 1.0
+      min_hz: 5.0
+      hz_window_sec: 5.0
+      min_bytes: 1
+      check_stamp_progress: true
+      check_stamp_age: false
+      max_age_sec: 0.5
+      qos:
+        reliability: best_effort
+        durability: volatile
+        depth: 5

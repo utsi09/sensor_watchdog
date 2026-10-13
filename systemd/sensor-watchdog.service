@@ -1,0 +1,23 @@
+# ~/.config/systemd/user/sensor-watchdog.service  (IPC, Orin 둘 다)
+# 와치독 노드 자체를 systemd 가 감시한다. 5초 안에 WATCHDOG=1 알림이 없으면 종료 후 재시작한다.
+[Unit]
+Description=Sensor watchdog
+After=lidar.service rtk-gps.service cam.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=5
+
+# 장비마다 CONFIG 를 ipc.yaml / orin.yaml 로, NODE 를 watchdog_ipc / watchdog_orin 으로
+Environment=CONFIG=%h/.config/sensor_watchdog/watchdog.yaml
+Environment=NODE=watchdog_ipc
+ExecStart=/bin/bash -c 'source %h/.config/sensor_watchdog/env.bash && source %h/watchdog_ws/install/setup.bash && exec ros2 run sensor_watchdog watchdog_node --ros-args -r __node:=$NODE --params-file $CONFIG'
+
+KillSignal=SIGINT
+TimeoutStopSec=10
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

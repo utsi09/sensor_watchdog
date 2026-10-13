@@ -1,0 +1,18 @@
+# ~/.config/systemd/user/rtk-gps.service  (IPC)
+[Unit]
+Description=RTK GPS driver launch
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c 'source %h/.config/sensor_watchdog/env.bash && exec ros2 launch CHANGE_ME_PKG CHANGE_ME_gps.launch.py'
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=3
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Install]
+WantedBy=default.target

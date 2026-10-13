@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# 사다리의 마지막 칸: 전원 리셋.
+# 호출: power_cycle.sh <sensor_id>      (watchdog 이 센서 id 를 마지막 인자로 붙인다)
+# 종료 코드 0 = 명령 자체는 성공. 센서가 살아났는지는 watchdog 이 토픽으로 다시 확인한다.
+#
+# 실제 수단이 있을 때만 설정에 power_cmd 로 등록한다. 없으면 이 칸은 자동으로 건너뛴다.
+
+set -eu
+
+sensor=${1:?sensor id required}
+
+case "$sensor" in
+    lidar)
+        # 예: PoE 스위치 포트 off/on (SNMP, 벤더 CLI 등)
+        # snmpset -v2c -c private 192.0.2.1 ... 2 ; sleep 3 ; snmpset ... 1
+        echo "power cycle not configured for $sensor" >&2
+        exit 2
+        ;;
+    camera)
+        # 예: USB 허브 포트 (uhubctl), 또는 GPIO 릴레이
+        # uhubctl -l 1-2 -p 3 -a cycle -d 3
+        echo "power cycle not configured for $sensor" >&2
+        exit 2
+        ;;
+    *)
+        echo "unknown sensor: $sensor" >&2
+        exit 64
+        ;;
+esac

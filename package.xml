@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>sensor_watchdog</name>
+  <version>0.2.0</version>
+  <description>
+    Sensor health monitor with raw observation logging, diagnostics publishing,
+    safety-gated escalating recovery (lifecycle, systemd, power), and MCU heartbeat.
+  </description>
+
+  <maintainer email="utsi09@g.skku.edu">Eum Tae-Wook</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>lifecycle_msgs</depend>
+
+  <!-- GenericSubscription이 실행 중에 타입 라이브러리를 읽는다 -->
+  <exec_depend>sensor_msgs</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

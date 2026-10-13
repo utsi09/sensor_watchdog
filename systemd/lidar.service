@@ -1,0 +1,25 @@
+# ~/.config/systemd/user/lidar.service  (IPC)
+# 예전 alias `lidar` 가 실행하던 실제 명령을 ExecStart 의 ros2 launch 자리에 넣는다.
+#   alias lidar   ← 이 출력에서 명령만 복사
+[Unit]
+Description=LiDAR driver launch
+After=network-online.target
+
+[Service]
+Type=simple
+# ROS 환경, 워크스페이스, DDS 설정을 여기에 모아둔다 (scripts/env.bash.example 참고)
+ExecStart=/bin/bash -c 'source %h/.config/sensor_watchdog/env.bash && exec ros2 launch CHANGE_ME_PKG CHANGE_ME_lidar.launch.py'
+
+# ros2 launch 는 SIGINT 를 받으면 자식 노드까지 정상 종료한다.
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=10
+
+# 스스로 죽으면 systemd 가 다시 띄운다. 5분에 3번까지.
+Restart=on-failure
+RestartSec=3
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Install]
+WantedBy=default.target

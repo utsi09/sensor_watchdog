@@ -273,13 +273,23 @@ public:
             "act_on_faults",
             std::vector<std::string>{"RX_TIMEOUT", "NO_PUBLISHER", "NODE_NOT_VISIBLE"});
 
-        for (const auto &name : act_on_faults_) {
-            bool known = false;
-            for (int i = 0; i <= static_cast<int>(Fault::LOW_HZ); ++i)
-                known = known || (name == to_string(static_cast<Fault>(i)));
-            if (!known)
-                throw std::runtime_error("act_on_faults: unknown fault '" + name + "'");
+        // 애매한 고장(주기 저하, 타임스탬프 이상). 더 오래 지속될 때만 행동한다.
+        act_on_faults_slow_ = declare_parameter<std::vector<std::string>>(
+            "act_on_faults_slow",
+            std::vector<std::string>{"LOW_RX_HZ", "STAMP_NOT_ADVANCING", "STAMP_INVALID_OR_BACKWARD"});
+        slow_fault_hold_ = declare_parameter<double>("slow_fault_hold_sec", 10.0);
+
+        for (const auto *list : {&act_on_faults_, &act_on_faults_slow_}) {
+            for (const auto &name : *list) {
+                bool known = false;
+                for (int i = 0; i <= static_cast<int>(Fault::LOW_HZ); ++i)
+                    known = known || (name == to_string(static_cast<Fault>(i)));
+                if (!known)
+                    throw std::runtime_error("act_on_faults: unknown fault '" + name + "'");
+            }
         }
+        if (!std::isfinite(slow_fault_hold_) || slow_fault_hold_ < 0)
+            throw std::runtime_error("slow_fault_hold_sec must be >= 0");
         base.cooldown_sec = declare_parameter<double>("cooldown_sec", 30.0);
         base.attempts_per_step = declare_parameter<int>("attempts_per_step", 2);
         base.healthy_reset_sec = declare_parameter<double>("healthy_reset_sec", 600.0);
@@ -634,7 +644,15 @@ private:
             g.matched = s.sub->get_publisher_count();
 
             const Fault fault = s.health.diagnose(t, g);
-            const Verdict v = s.ladder.evaluate(t, fault);
+            const std::string fault_name = to_string(fault);
+            const bool hard = std::find(act_on_faults_.begin(), act_on_faults_.end(),
+                                        fault_name) != act_on_faults_.end();
+            const bool slow = std::find(act_on_faults_slow_.begin(), act_on_faults_slow_.end(),
+                                        fault_name) != act_on_faults_slow_.end();
+
+            // 확실한 끊김은 fault_hold_sec, 애매한 고장은 slow_fault_hold_sec 만큼 참는다
+            const double hold = hard ? s.ladder.policy().hold_sec : slow_fault_hold_;
+            const Verdict v = s.ladder.evaluate(t, fault, hold);
 
             std::string state = to_string(v);
 
@@ -655,9 +673,7 @@ private:
                 worst = std::max(worst, 1);
             }
 
-            const bool actionable =
-                std::find(act_on_faults_.begin(), act_on_faults_.end(),
-                          std::string(to_string(fault))) != act_on_faults_.end();
+            const bool actionable = hard || slow;
 
             if (v == Verdict::ACT && !actionable) {
                 state = "MONITOR_ONLY";
@@ -811,6 +827,8 @@ private:
     double action_timeout_ = 30.0;
     std::vector<std::string> systemctl_cmd_;
     std::vector<std::string> act_on_faults_;
+    std::vector<std::string> act_on_faults_slow_;
+    double slow_fault_hold_ = 10.0;
 
     bool gate_value_ = false;
     uint64_t gate_last_value_ = 0;

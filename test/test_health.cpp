@@ -275,6 +275,16 @@ static void test_ladder_recovers_between()
     CHECK(l.attempts() == 1);
 }
 
+static void test_ladder_per_fault_hold()
+{
+    // 예측: 같은 Ladder 에서 hold 를 10초로 주면 10초 전엔 HOLDING, 지나면 ACT
+    Ladder l(policy_two_steps());
+    l.reset(0.0);
+    CHECK(l.evaluate(20.0, Fault::LOW_HZ, 10.0) == Verdict::HOLDING);
+    CHECK(l.evaluate(29.9, Fault::LOW_HZ, 10.0) == Verdict::HOLDING);
+    CHECK(l.evaluate(30.0, Fault::LOW_HZ, 10.0) == Verdict::ACT);
+}
+
 static void test_ladder_empty()
 {
     // 예측: 사다리 없음 = 감시만. 고장이면 바로 EXHAUSTED
@@ -354,6 +364,7 @@ int main()
     test_ladder_flow();
     test_ladder_recovers_between();
     test_ladder_empty();
+    test_ladder_per_fault_hold();
     test_common_cause();
     test_parse_step();
     test_cdr_first_int();

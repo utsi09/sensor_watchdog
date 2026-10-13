@@ -346,10 +346,10 @@ ssh -o BatchMode=yes orin 'whoami'           # 역시 재시작만 됨
 | `NO_MATCHED_PUBLISHER_CHECK_QOS_TYPE` | 발행자는 있으나 QoS/타입 불일치로 매칭 안 됨 | X (설정 문제) |
 | `RX_TIMEOUT` | `timeout_sec` 동안 메시지 없음 | O |
 | `TOO_SMALL` | 메시지가 `min_bytes` 보다 작음 | X |
-| `STAMP_INVALID_OR_BACKWARD` | 타임스탬프가 비정상이거나 뒤로 감 | X |
+| `STAMP_INVALID_OR_BACKWARD` | 타임스탬프가 비정상이거나 뒤로 감 | 10초 지속 시 |
 | `STAMP_AGE_OR_CLOCK` | 메시지가 너무 오래됨 (`check_stamp_age` 켰을 때만) | X |
-| `STAMP_NOT_ADVANCING` | 메시지는 오는데 타임스탬프가 안 바뀜 | X |
-| `LOW_RX_HZ` | 수신 주기가 `min_hz` 미만 | X |
+| `STAMP_NOT_ADVANCING` | 메시지는 오는데 타임스탬프가 안 바뀜 | 10초 지속 시 |
+| `LOW_RX_HZ` | 수신 주기가 `min_hz` 미만 | 10초 지속 시 |
 
 ---
 
@@ -401,7 +401,7 @@ sensor_msgs 의 PointCloud2, Image, CompressedImage, NavSatFix, Imu 모두 첫 �
 
 `ACT` 판정이 나도 바로 재시작하지 않습니다.
 
-1. **고장 종류가 `act_on_faults` 에 있는가.** 기본은 `RX_TIMEOUT`, `NO_PUBLISHER`, `NODE_NOT_VISIBLE` 세 가지. 나머지는 `MONITOR_ONLY`.
+1. **고장 종류가 행동 대상인가.** 확실한 끊김(`act_on_faults`)은 2초, 애매한 고장(`act_on_faults_slow`)은 10초 지속돼야 행동. 둘 다 아니면 `MONITOR_ONLY`.
 2. **공통 원인이 아닌가.** `common_cause_window_sec`(3초) 안에 `common_cause_min`(3개) 이상 센서가 함께 죽었으면 `BLOCKED_COMMON_CAUSE`. 네트워크나 호스트 문제에 센서를 재시작해 봐야 소용없기 때문입니다.
 3. **안전 게이트가 허용했는가.** `gate_topic` 을 설정하면 그 값(예: 기어 P)이 맞을 때만. 단, 고장이 `gate_bypass_after_sec` 이상 계속되면 게이트를 무시합니다. 기본값은 `fault_hold_sec` 와 같아서 "확실히 끊긴 센서는 기어와 무관하게 재시작"됩니다.
 4. **`dry_run` 이 꺼져 있는가.** 켜져 있으면 `DRY_RUN_WOULD_*` 만 기록.
@@ -474,7 +474,9 @@ values: fault, state, rx_hz, age_sec, rx_count, step, attempts_at_step, total_ac
 | `heartbeat_port` | `5005` | |
 | `startup_grace_sec` | `10.0` | 시작·행동 직후 판정 유예 |
 | `fault_hold_sec` | `2.0` | 고장 표시 후 이만큼 더 지속돼야 행동 |
-| `act_on_faults` | `[RX_TIMEOUT, NO_PUBLISHER, NODE_NOT_VISIBLE]` | 행동하는 고장 종류 |
+| `act_on_faults` | `[RX_TIMEOUT, NO_PUBLISHER, NODE_NOT_VISIBLE]` | 확실한 끊김. `fault_hold_sec` 뒤 행동 |
+| `act_on_faults_slow` | `[LOW_RX_HZ, STAMP_NOT_ADVANCING, STAMP_INVALID_OR_BACKWARD]` | 애매한 고장. `slow_fault_hold_sec` 뒤 행동 |
+| `slow_fault_hold_sec` | `10.0` | 애매한 고장이 이만큼 지속돼야 행동 |
 | `cooldown_sec` | `30.0` | 행동 완료 후 다음 행동까지 최소 간격 |
 | `attempts_per_step` | `2` | 같은 칸 시도 횟수 |
 | `healthy_reset_sec` | `600.0` | 이만큼 정상이면 사다리 초기화 |
@@ -615,8 +617,8 @@ MCU 는 IPC 에 묻지 않고 스스로 판단합니다. 지키는 쪽이 지켜
 **전원 리셋이 IPC 재부팅인가요?**
 아닙니다. 센서 장치 하나의 전원만 끊었다 잇는 것입니다. PoE 스위치 포트, USB 허브 포트, 릴레이 등. 그런 수단이 없으면 `power_cmd` 를 설정하지 않으면 되고, 그러면 그 단계는 자동으로 빠집니다.
 
-**주기가 떨어진 센서는 왜 재시작하지 않나요?**
-조금이라도 오는 센서를 재시작하면 10초 이상 완전히 끊깁니다. "반쯤 오는 것"과 "안 오는 것" 중 어느 쪽이 나은지는 상황마다 달라서, 기본은 기록만 하고 판단은 사람에게 맡깁니다. 재시작하고 싶으면 `act_on_faults` 에 `LOW_RX_HZ` 를 추가하면 됩니다.
+**주기가 떨어진 센서는 언제 재시작하나요?**
+확실한 끊김은 3초면 재시작하지만, 주기 저하나 타임스탬프 이상은 10초(`slow_fault_hold_sec`) 지속돼야 재시작합니다. 잠깐 튀는 건 혼자 돌아오는 경우가 많고, 조금이라도 오는 센서를 재시작하면 10초 이상 완전히 끊기기 때문입니다. 10초 넘게 계속 이상하면 드라이버 문제로 보고 재시작합니다.
 
 **카메라가 `sensor_msgs/msg/Image` 인데요?**
 `type` 만 바꾸면 됩니다. 코드 수정 없음. 첫 필드가 `std_msgs/Header` 인 타입이면 뭐든 됩니다.

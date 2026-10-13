@@ -270,6 +270,12 @@ public:
 
     Verdict evaluate(double now, Fault fault)
     {
+        return evaluate(now, fault, policy_.hold_sec);
+    }
+
+    // hold_sec: 이 고장 종류에 적용할 대기 시간. 고장마다 다르게 줄 수 있다.
+    Verdict evaluate(double now, Fault fault, double hold_sec)
+    {
         if (now < grace_until_)
             return Verdict::GRACE;
 
@@ -295,7 +301,7 @@ public:
         if (exhausted_ || policy_.ladder.empty())
             return Verdict::EXHAUSTED;
 
-        if (now - bad_since_ < policy_.hold_sec)
+        if (now - bad_since_ < hold_sec)
             return Verdict::HOLDING;
 
         if (now < next_action_)

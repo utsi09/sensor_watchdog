@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 
 namespace sensor_watchdog
 {
@@ -46,12 +47,31 @@ inline std::optional<Stamp> read_header_stamp(const uint8_t *data, std::size_t s
 namespace sensor_watchdog
 {
 
-// 메시지의 첫 정수 필드를 읽는다. (선택) 앞에 std_msgs/Header 가 있으면 건너뛴다.
+// 게이트 메시지에서 첫 정수 필드 앞에 무엇이 오는가.
+//   NONE   : 바로 정수 (std_msgs/Bool, UInt8 등)
+//   STAMP  : builtin_interfaces/Time stamp 뒤 정수 (autoware_vehicle_msgs/GearReport 등)
+//   HEADER : std_msgs/Header 뒤 정수 (stamp + frame_id 문자열)
+enum class Prefix
+{
+    NONE,
+    STAMP,
+    HEADER
+};
+
+inline bool parse_prefix(const std::string &name, Prefix &out)
+{
+    if (name == "none")   { out = Prefix::NONE;   return true; }
+    if (name == "stamp")  { out = Prefix::STAMP;  return true; }
+    if (name == "header") { out = Prefix::HEADER; return true; }
+    return false;
+}
+
+// 메시지의 첫 정수 필드를 읽는다. 앞의 prefix(없음/stamp/Header)는 건너뛴다.
 // 게이트 토픽(기어 상태 등)을 타입 의존 없이 읽기 위한 용도.
 //   bytes: 필드 크기. bool/int8/uint8=1, int16=2, int32=4, int64=8
 // CDR 규칙: 기본형은 본문 시작(인캡슐레이션 4바이트 뒤) 기준으로 자기 크기에 맞춰 정렬된다.
 inline std::optional<uint64_t> read_first_int(
-    const uint8_t *data, std::size_t size, bool has_header, std::size_t bytes)
+    const uint8_t *data, std::size_t size, Prefix prefix, std::size_t bytes)
 {
     if (!data || size < 4 || data[0] != 0x00 || data[1] > 0x01)
         return std::nullopt;
@@ -71,8 +91,10 @@ inline std::optional<uint64_t> read_first_int(
         return v;
     };
 
-    if (has_header) {
+    if (prefix == Prefix::STAMP || prefix == Prefix::HEADER)
         off = 8;                               // sec(4) + nanosec(4)
+
+    if (prefix == Prefix::HEADER) {
         const auto len = u32_at(off);          // frame_id 길이(널 포함)
         if (!len) return std::nullopt;
         off += 4 + *len;
@@ -91,6 +113,13 @@ inline std::optional<uint64_t> read_first_int(
         v |= static_cast<uint64_t>(data[idx]) << (8 * i);
     }
     return v;
+}
+
+// 이전 인터페이스 호환: has_header=true 는 HEADER, false 는 NONE.
+inline std::optional<uint64_t> read_first_int(
+    const uint8_t *data, std::size_t size, bool has_header, std::size_t bytes)
+{
+    return read_first_int(data, size, has_header ? Prefix::HEADER : Prefix::NONE, bytes);
 }
 
 }  // namespace sensor_watchdog

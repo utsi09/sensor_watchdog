@@ -296,6 +296,32 @@ static void test_ladder_empty()
     CHECK(l.evaluate(21.0, Fault::NONE) == Verdict::HEALTHY);
 }
 
+static void test_ladder_defer()
+{
+    Policy p;
+    p.grace_sec = 10.0;
+    p.hold_sec = 2.0;
+    p.cooldown_sec = 30.0;
+    p.ladder = {Step::SERVICE};
+    Ladder l(p);
+    l.reset(0.0);
+
+    // 예측: 15초부터 고장 → 17초에 ACT
+    CHECK(l.evaluate(15.0, Fault::RX_TIMEOUT) == Verdict::HOLDING);
+    CHECK(l.evaluate(17.0, Fault::RX_TIMEOUT) == Verdict::ACT);
+
+    // 예측: 형제 센서가 20초에 유닛을 재시작 → 이 센서는 유예(30초까지), 시도 횟수 0 유지
+    l.defer(20.0);
+    CHECK(l.evaluate(25.0, Fault::RX_TIMEOUT) == Verdict::GRACE);
+    CHECK(l.attempts() == 0);
+    CHECK(l.bad_since() < 0.0);
+
+    // 예측: 유예 뒤에도 고장이면 hold 를 다시 세고(32초), 그 뒤엔 쿨다운(50초까지)에 걸린다
+    CHECK(l.evaluate(30.5, Fault::RX_TIMEOUT) == Verdict::HOLDING);
+    CHECK(l.evaluate(33.0, Fault::RX_TIMEOUT) == Verdict::COOLDOWN);
+    CHECK(l.evaluate(50.0, Fault::RX_TIMEOUT) == Verdict::ACT);
+}
+
 static void test_common_cause()
 {
     // 예측: 3개 중 2개가 3초 안에 같이 죽으면 true
@@ -309,6 +335,29 @@ static void test_common_cause()
     CHECK(common_cause({10.0, 11.0, 12.9}, 3, 3.0));
     // 예측: min_count<2 는 항상 false (설정 실수 방지)
     CHECK(!common_cause({10.0, 10.0, 10.0}, 1, 3.0));
+}
+
+static void test_common_cause_by_domain()
+{
+    // 예측: 라이다 4대가 같은 유닛(lidar)에서 동시에 죽어도 복구 단위는 1개 → 공통 원인 아님
+    CHECK(!common_cause_by_domain(
+        {{"lidar", 10.0}, {"lidar", 10.1}, {"lidar", 10.2}, {"lidar", 10.3}, {"gps", -1.0}},
+        2, 3.0));
+    // 예측: 라이다 유닛과 GPS 유닛이 3초 안에 같이 죽으면 공통 원인
+    CHECK(common_cause_by_domain(
+        {{"lidar", 10.0}, {"lidar", 10.1}, {"lidar", -1.0}, {"lidar", -1.0}, {"gps", 12.0}},
+        2, 3.0));
+    // 예측: 유닛별로 가장 최근 고장 시작을 쓴다. 앞 라이다는 10.0 부터 죽어 있었고,
+    //       나중에 호스트가 죽어 나머지 라이다(40.0)와 GPS(40.2)가 같이 끊김 → 공통 원인
+    CHECK(common_cause_by_domain(
+        {{"lidar", 10.0}, {"lidar", 40.0}, {"lidar", 40.0}, {"gps", 40.2}},
+        2, 3.0));
+    // 예측: 라이다 유닛은 10.0, GPS 는 14.0 에 따로 죽음 → 간격 4초 → 아님
+    CHECK(!common_cause_by_domain(
+        {{"lidar", 10.0}, {"lidar", 10.0}, {"gps", 14.0}},
+        2, 3.0));
+    // 예측: min_count 가 복구 단위 수보다 크면 절대 true 가 아니다
+    CHECK(!common_cause_by_domain({{"lidar", 10.0}, {"gps", 10.0}}, 3, 3.0));
 }
 
 static void test_parse_step()
@@ -348,6 +397,35 @@ static void test_cdr_first_int()
 
     // 예측: 길이가 모자라면 nullopt
     CHECK(!read_first_int(g4, sizeof(g4) - 1, true, 4).has_value());
+
+    // 예측: autoware_vehicle_msgs/GearReport 는 stamp(8바이트) 뒤 바로 uint8 report.
+    //       Header 가 아니므로 Prefix::STAMP 로 읽어야 22(PARK) 가 나온다.
+    const uint8_t gr[] = {0x00, 0x01, 0x00, 0x00,
+                          0x10, 0x00, 0x00, 0x00,   // sec
+                          0x20, 0x00, 0x00, 0x00,   // nanosec
+                          22,                       // report = PARK
+                          0x00, 0x00, 0x00};        // 패딩
+    auto park = read_first_int(gr, sizeof(gr), Prefix::STAMP, 1);
+    CHECK(park.has_value() && *park == 22);
+    // 예측: 같은 바이트를 HEADER 로 잘못 읽으면 22 를 frame_id 길이로 보고 길이 부족 → nullopt
+    CHECK(!read_first_int(gr, sizeof(gr), Prefix::HEADER, 1).has_value());
+    // 예측: NONE 으로 읽으면 sec 의 첫 바이트(0x10) 가 나온다 (설정 실수 시 증상)
+    auto wrong = read_first_int(gr, sizeof(gr), Prefix::NONE, 1);
+    CHECK(wrong.has_value() && *wrong == 0x10);
+
+    // 예측: stamp 뒤 int32 필드는 8바이트 오프셋이 이미 4의 배수라 패딩 없음
+    const uint8_t gr4[] = {0x00, 0x01, 0x00, 0x00,
+                           0, 0, 0, 0,  0, 0, 0, 0,
+                           0x07, 0x00, 0x00, 0x00};
+    auto v32 = read_first_int(gr4, sizeof(gr4), Prefix::STAMP, 4);
+    CHECK(v32.has_value() && *v32 == 7);
+
+    // 예측: 문자열 파싱
+    Prefix pf;
+    CHECK(parse_prefix("none", pf) && pf == Prefix::NONE);
+    CHECK(parse_prefix("stamp", pf) && pf == Prefix::STAMP);
+    CHECK(parse_prefix("header", pf) && pf == Prefix::HEADER);
+    CHECK(!parse_prefix("Header", pf));
 }
 
 int main()
@@ -365,7 +443,9 @@ int main()
     test_ladder_recovers_between();
     test_ladder_empty();
     test_ladder_per_fault_hold();
+    test_ladder_defer();
     test_common_cause();
+    test_common_cause_by_domain();
     test_parse_step();
     test_cdr_first_int();
 

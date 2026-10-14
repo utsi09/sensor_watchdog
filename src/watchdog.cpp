@@ -6,6 +6,7 @@
 //   3. 200ms마다 판정하고 /diagnostics 로 상태를 발행한다
 //   4. 고장이 지속되면 사다리(lifecycle → service → power)를 한 칸씩 올라간다
 //   5. 단, 안전 게이트(gate_topic)가 허용하고 공통 원인이 아닐 때만 행동한다
+//      (공통 원인은 복구 단위=유닛 기준. 한 유닛을 공유하는 센서는 한 번만 재시작한다)
 //   6. systemd에 WATCHDOG=1 핑, MCU에 UDP 하트비트
 //   7. 모든 행동과 복구 시간을 events.csv 에 남긴다
 //
@@ -206,6 +207,10 @@ struct Sensor
     std::vector<std::string> power_cmd;
     std::vector<std::string> systemctl_cmd;   // 비어 있으면 전역 systemctl_cmd 사용
 
+    // 복구 단위 키. 같은 유닛(같은 systemctl_cmd + unit)을 쓰는 센서는 같은 키를 갖는다.
+    // 라이다 4대가 한 런치에서 돌면 넷이 같은 키. 유닛이 없으면 센서 id.
+    std::string domain;
+
     Health health;
     Ladder ladder;
 
@@ -239,7 +244,19 @@ public:
         // 예) /ad_can/gear 의 기어 값이 P(파킹)일 때만.
         gate_topic_ = declare_parameter<std::string>("gate_topic", "");
         gate_type_ = declare_parameter<std::string>("gate_type", "std_msgs/msg/Bool");
-        gate_has_header_ = declare_parameter<bool>("gate_has_header", false);
+        // 첫 정수 필드 앞에 무엇이 오는가: "none" | "stamp" | "header"
+        //   std_msgs/Bool                      → none
+        //   autoware_vehicle_msgs/GearReport   → stamp  (builtin_interfaces/Time stamp 뒤 uint8 report)
+        //   std_msgs/Header 로 시작하는 타입    → header
+        {
+            const auto prefix = declare_parameter<std::string>("gate_prefix", "");
+            // 이전 설정 호환: gate_prefix 가 없으면 gate_has_header 를 따른다.
+            const bool has_header = declare_parameter<bool>("gate_has_header", false);
+            if (prefix.empty())
+                gate_prefix_ = has_header ? Prefix::HEADER : Prefix::NONE;
+            else if (!parse_prefix(prefix, gate_prefix_))
+                throw std::runtime_error("gate_prefix must be none, stamp or header");
+        }
         gate_field_bytes_ = declare_parameter<int>("gate_field_bytes", 1);
         gate_ok_value_ = declare_parameter<int>("gate_ok_value", 1);
         gate_timeout_ = declare_parameter<double>("gate_timeout_sec", 1.0);
@@ -346,7 +363,7 @@ public:
                     const auto &rcl = msg->get_rcl_serialized_message();
                     const auto v = read_first_int(
                         rcl.buffer, rcl.buffer_length,
-                        gate_has_header_, static_cast<std::size_t>(gate_field_bytes_));
+                        gate_prefix_, static_cast<std::size_t>(gate_field_bytes_));
                     if (!v)
                         return;   // 파싱 실패는 "허용 아님"으로 남는다
 
@@ -431,6 +448,15 @@ private:
         s->systemctl_cmd = param<std::vector<std::string>>(
             id, "systemctl_cmd", std::vector<std::string>{});
 
+        if (s->unit.empty()) {
+            s->domain = "sensor:" + id;
+        } else {
+            s->domain = "unit:";
+            for (const auto &w : (s->systemctl_cmd.empty() ? systemctl_cmd_ : s->systemctl_cmd))
+                s->domain += w + " ";
+            s->domain += s->unit;
+        }
+
         if (s->topic.empty() || s->topic.front() != '/')
             throw std::runtime_error(id + ": topic must start with '/'");
         if (s->type.empty())
@@ -482,9 +508,10 @@ private:
         for (Step st : p.ladder)
             ladder_str += std::string(ladder_str.empty() ? "" : ">") + to_string(st);
 
-        RCLCPP_INFO(get_logger(), "[%s] topic=%s type=%s ladder=%s",
+        RCLCPP_INFO(get_logger(), "[%s] topic=%s type=%s ladder=%s domain=%s",
             id.c_str(), s->topic.c_str(), s->type.c_str(),
-            ladder_str.empty() ? "(monitor only)" : ladder_str.c_str());
+            ladder_str.empty() ? "(monitor only)" : ladder_str.c_str(),
+            s->domain.c_str());
 
         sensors_.push_back(std::move(s));
     }
@@ -589,6 +616,36 @@ private:
         event(s, "action_start", to_string(a.step), -1, a.describe);
     }
 
+    // 같은 복구 단위(유닛)를 공유하는 다른 센서들
+    std::vector<Sensor *> siblings(const Sensor &s)
+    {
+        std::vector<Sensor *> out;
+        for (auto &o : sensors_)
+            if (o.get() != &s && o->domain == s.domain)
+                out.push_back(o.get());
+        return out;
+    }
+
+    // 같은 유닛에서 이미 행동이 진행 중인가
+    bool domain_acting(const Sensor &s)
+    {
+        for (Sensor *o : siblings(s))
+            if (o->action)
+                return true;
+        return false;
+    }
+
+    // 유닛이 재시작되면 그 유닛의 다른 센서도 함께 끊기고 다시 올라온다.
+    // 그 센서들의 관측을 비우고 유예·쿨다운을 준다. 사다리 시도 횟수는 올리지 않는다.
+    void grace_siblings(Sensor &s, double t, const char *why)
+    {
+        for (Sensor *o : siblings(s)) {
+            o->health.reset(t);
+            o->ladder.defer(t);
+            event(*o, "sibling_grace", "", -1, std::string(why) + " by " + s.id);
+        }
+    }
+
     // ---------------- 주기 검사
 
     void tick()
@@ -604,10 +661,12 @@ private:
         const bool gate_ok =
             gate_topic_.empty() || (gate_value_ && t - gate_rx_ <= gate_timeout_);
 
-        std::vector<double> bad_since;
+        // 공통 원인은 센서 수가 아니라 복구 단위(유닛) 수로 센다.
+        // 한 런치의 라이다 4대가 같이 죽은 것은 그 유닛 하나의 고장이다.
+        std::vector<std::pair<std::string, double>> domains;
         for (const auto &s : sensors_)
-            bad_since.push_back(s->ladder.bad_since());
-        const bool cc = common_cause(bad_since, common_cause_min_, common_cause_window_);
+            domains.emplace_back(s->domain, s->ladder.bad_since());
+        const bool cc = common_cause_by_domain(domains, common_cause_min_, common_cause_window_);
 
         int ok_count = 0;
         int worst = 0;
@@ -631,9 +690,12 @@ private:
                     s.id.c_str(), r);
                 event(s, "action_done", to_string(s.action->step), r, s.action->describe);
 
+                const Step done_step = s.action->step;
                 s.action.reset();
                 s.health.reset(t);
                 s.ladder.on_action_finished(t);
+                if (done_step != Step::LIFECYCLE)
+                    grace_siblings(s, t, "action_done");
             }
 
             GraphView g;
@@ -686,7 +748,12 @@ private:
                     s.ladder.bad_since() >= 0.0 &&
                     t - s.ladder.bad_since() >= gate_bypass_after_;
 
+                // 같은 유닛을 다른 센서가 이미 재시작 중이면 중복 재시작하지 않고 기다린다.
+                const bool shared_acting =
+                    s.ladder.current() != Step::LIFECYCLE && domain_acting(s);
+
                 if (cc)                               state = "BLOCKED_COMMON_CAUSE";
+                else if (shared_acting)               state = "WAIT_SHARED_ACTION";
                 else if (!gate_ok && !gate_bypass)    state = "BLOCKED_GATE";
                 else if (dry_run_)                    state = std::string("DRY_RUN_WOULD_") + to_string(s.ladder.current());
                 else {
@@ -695,6 +762,8 @@ private:
                         event(s, "gate_bypass", "", -1,
                             "fault persisted " + std::to_string(t - s.ladder.bad_since()) + "s");
                     start_action(s, t);
+                    if (s.action && s.action->step != Step::LIFECYCLE)
+                        grace_siblings(s, t, "action_start");
                     state = "ACTING";
                 }
             }
@@ -816,7 +885,7 @@ private:
     std::string raw_log_dir_;
     std::string gate_topic_;
     std::string gate_type_;
-    bool gate_has_header_ = false;
+    Prefix gate_prefix_ = Prefix::NONE;
     int gate_field_bytes_ = 1;
     int gate_ok_value_ = 1;
     bool gate_reliable_ = true;

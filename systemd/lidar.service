@@ -1,6 +1,9 @@
 # ~/.config/systemd/user/lidar.service  (IPC)
+# RoboSense 라이다 4대(front_m1p, rear_m1p, left_bp, right_bp)를 띄우는 런치.
 # 예전 alias `lidar` 가 실행하던 실제 명령을 ExecStart 의 ros2 launch 자리에 넣는다.
 #   alias lidar   ← 이 출력에서 명령만 복사
+# 네 대가 한 런치에서 돌면 이 유닛 하나로 충분하다. ipc.yaml 의 네 라이다 모두 unit: lidar.service.
+# 라이다마다 런치가 따로면 이 파일을 lidar-front-m1p.service 처럼 복사해 나누고 ipc.yaml 의 unit 도 맞춘다.
 [Unit]
 Description=LiDAR driver launch
 After=network-online.target

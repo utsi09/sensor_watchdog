@@ -7,18 +7,15 @@
     dry_run: true
     raw_log_dir: "~/.local/state/sensor_watchdog"
 
-    # 안전 게이트: 이 토픽의 첫 정수 필드가 gate_ok_value 와 같을 때만 복구 행동을 허용한다.
-    # 예) /ad_can/gear 의 기어 값이 P(파킹)일 때만 재시작.
-    #   gate_type       : ros2 topic type /ad_can/gear
-    #   gate_has_header : ros2 interface show <타입> 첫 줄이 std_msgs/Header 면 true
-    #   gate_field_bytes: 헤더 다음 첫 필드 크기. bool/int8/uint8=1, int16=2, int32=4, int64=8
-    #   gate_ok_value   : 허용 값 (P 에 해당하는 숫자)
-    # gate_topic 을 "" 로 두면 항상 허용 (벤치 시험용). 실차에서는 반드시 설정한다.
-    gate_topic: ""
-    gate_type: std_msgs/msg/Bool
-    gate_has_header: false
+    # 안전 게이트: 기어가 P(22)일 때만 복구 행동을 허용한다. ipc.yaml 과 같은 토픽.
+    # Orin 이 IPC 와 같은 ROS_DOMAIN_ID 라면 /vehicle/status/gear_status 가 보인다.
+    # 안 보이면 gate_topic 을 "" 로 두고 (항상 허용) 기록으로 확인한다.
+    #   autoware_vehicle_msgs/msg/GearReport = { builtin_interfaces/Time stamp; uint8 report }
+    gate_topic: /vehicle/status/gear_status
+    gate_type: autoware_vehicle_msgs/msg/GearReport
+    gate_prefix: stamp          # none | stamp | header
     gate_field_bytes: 1
-    gate_ok_value: 1
+    gate_ok_value: 22           # PARK
     gate_reliable: true
     gate_timeout_sec: 1.0
     # 고장이 이 시간 이상 계속되면 게이트를 무시하고 바로 복구한다. 기본값은 fault_hold_sec 와 같아서

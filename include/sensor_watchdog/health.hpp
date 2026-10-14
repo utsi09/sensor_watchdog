@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <deque>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace sensor_watchdog
@@ -325,6 +326,16 @@ public:
         healthy_since_ = -1.0;
     }
 
+    // 같은 유닛의 다른 센서가 행동했을 때. 이 센서도 함께 끊기고 올라오므로
+    // 유예와 쿨다운을 같이 받는다. 시도 횟수는 올리지 않는다.
+    void defer(double now)
+    {
+        grace_until_ = now + policy_.grace_sec;
+        next_action_ = now + policy_.cooldown_sec;
+        bad_since_ = -1.0;
+        healthy_since_ = -1.0;
+    }
+
     void on_action_finished(double now)
     {
         grace_until_ = now + policy_.grace_sec;
@@ -376,6 +387,35 @@ inline bool common_cause(std::vector<double> bad_since, int min_count, double wi
             return true;
     }
     return false;
+}
+
+
+// 센서가 아니라 "복구 단위"(같은 systemd 유닛을 공유하는 센서 묶음) 기준의 공통 원인 판정.
+// 라이다 4대가 한 런치(유닛)에서 돌면 드라이버가 죽을 때 4개가 동시에 끊긴다.
+// 그건 공통 원인이 아니라 그 유닛 하나의 고장이므로, 유닛별로 고장 시각 하나만 세어
+// common_cause 에 넘긴다. 유닛 안에서는 가장 최근에 시작된 고장을 쓴다: "지금 여러 유닛이
+// 동시에 죽었나"를 묻는 것이므로, 한 센서의 오래된 고장이 유닛 전체의 시각을 과거로 묶어 두면
+// 나중에 호스트가 죽어 전부 끊겨도 동시성이 보이지 않는다.
+//   domains: (복구 단위 키, bad_since) 쌍. 정상 센서는 bad_since 음수.
+inline bool common_cause_by_domain(
+    const std::vector<std::pair<std::string, double>> &domains, int min_count, double window)
+{
+    std::vector<std::pair<std::string, double>> latest;
+    for (const auto &d : domains) {
+        if (d.second < 0.0)
+            continue;
+        auto it = std::find_if(latest.begin(), latest.end(),
+                               [&](const auto &e) { return e.first == d.first; });
+        if (it == latest.end())
+            latest.emplace_back(d.first, d.second);
+        else
+            it->second = std::max(it->second, d.second);
+    }
+
+    std::vector<double> bad_since;
+    for (const auto &e : latest)
+        bad_since.push_back(e.second);
+    return common_cause(bad_since, min_count, window);
 }
 
 }  // namespace sensor_watchdog

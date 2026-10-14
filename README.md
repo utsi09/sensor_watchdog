@@ -6,7 +6,7 @@ ROS 2 Humble 용 센서 감시·자동 복구 노드입니다. 라이다, GPS, �
 - 와치독은 IPC 한 대에만 올립니다. 원격 장비(Jetson Orin 등)의 센서는 SSH 로 그 장비의 systemd 를 호출해 재시작합니다. 원격 장비엔 빌드가 필요 없습니다.
 - 처음엔 **감지 전용 모드**(`dry_run: true`)로 돌려서 오탐이 얼마나 되는지 확인한 뒤에 실제 재시작을 켭니다.
 
-> 상태: 판정 로직은 단위 테스트를 통과했습니다. 실제 ROS 2 Humble 빌드와 실차 검증은 아직 하지 않았습니다. 자세한 건 [검증 범위](#검증-범위와-한계) 참고.
+> 상태: 판정 로직은 단위 테스트를 통과했고, ROS 2 Humble 에서 빌드·기동까지 확인했습니다. 설정은 실차 rosbag 기준으로 채웠지만 실차에서 실제 재시작은 아직 검증하지 않았습니다. 자세한 건 [검증 범위](#검증-범위와-한계) 참고.
 
 ---
 
@@ -108,7 +108,7 @@ sensor_watchdog/
 ├── src/watchdog.cpp        ROS 노드. 구독, /diagnostics 발행, systemctl 호출, 기록
 ├── test/test_health.cpp    ROS 없이 돌아가는 단위 테스트
 ├── config/
-│   ├── ipc.yaml            IPC 용 (lidar, gps, camera). 기본 구성
+│   ├── ipc.yaml            IPC 용. 실차 bag 기준 라이다 4대 + GPS (+ 카메라 자리). 기본 구성
 │   └── orin.yaml           Orin 에 와치독을 따로 올릴 때만
 ├── systemd/
 │   ├── lidar.service       센서 런치를 systemd 서비스로
@@ -177,17 +177,20 @@ source /home/USER/sensor_ws/install/setup.bash    # 드라이버 워크스페이
 # export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ```
 
-**`~/.config/sensor_watchdog/watchdog.yaml`** — `CHANGE_ME` 를 실제 값으로.
+**`~/.config/sensor_watchdog/watchdog.yaml`** — `config/ipc.yaml` 은 실차 bag(bag1512) 기준으로 라이다 4대(`/front_m1p`, `/rear_m1p`, `/left_bp`, `/right_bp` 의 `rslidar_points`), GPS(`/fix`), 게이트(`/vehicle/status/gear_status`) 가 이미 채워져 있습니다. 남은 `CHANGE_ME` 는 카메라 토픽 하나이며, 카메라는 확인 전까지 `sensors` 목록에서 빠져 있습니다.
 
 ```yaml
-lidar:
-  topic: /velodyne_points                # 0번에서 확인한 이름
+front_m1p:
+  topic: /front_m1p/rslidar_points       # bag 에서 확인한 이름
   type: sensor_msgs/msg/PointCloud2
-  unit: lidar.service
+  unit: lidar.service                    # 네 대가 한 런치면 모두 같은 유닛
   qos:
-    reliability: best_effort             # ros2 topic info --verbose 와 맞춤
+    reliability: best_effort             # 발행자가 reliable 이어도 best_effort 구독은 호환됨
     durability: volatile
+    depth: 1                             # 헤더만 읽으므로 큐를 쌓지 않음
 ```
+
+같은 `unit` 을 쓰는 센서는 하나의 **복구 단위**로 묶입니다. 어느 한 대가 끊겨 유닛을 재시작하면 나머지는 유예(GRACE)로 들어가고 같은 틱에 중복 재시작하지 않습니다.
 
 **`~/.config/systemd/user/lidar.service`** — `ExecStart` 에 평소 치던 런치 명령.
 
@@ -329,7 +332,8 @@ ssh -o BatchMode=yes orin 'whoami'           # 역시 재시작만 됨
 | `[lidar] HOLDING: RX_TIMEOUT` | 1초 이상 끊김. 2초 더 지켜보는 중 | 보통 혼자 돌아옴 |
 | `[lidar] COOLDOWN: RX_TIMEOUT` | 고장인데 직전 재시작 후 30초 안 지남 | 기다림 |
 | `[lidar] MONITOR_ONLY: LOW_RX_HZ` | 고장이지만 재시작 대상 아님 (주기 저하 등) | 로그만 확인 |
-| `[lidar] BLOCKED_COMMON_CAUSE` | 여러 센서가 동시에 죽음. 센서 탓 아님 | 네트워크·호스트 확인 |
+| `[lidar] BLOCKED_COMMON_CAUSE` | 여러 복구 단위(유닛)가 동시에 죽음. 센서 탓 아님 | 네트워크·호스트 확인 |
+| `[rear_m1p] WAIT_SHARED_ACTION` | 같은 유닛을 다른 센서가 이미 재시작 중 | 기다리면 됨 |
 | `[lidar] BLOCKED_GATE` | 차량 쪽이 재시작 허가 안 함 | 정차 후 자동 진행 |
 | `[lidar] DRY_RUN_WOULD_service` | 감지 전용 모드. "원래면 지금 재시작했다" | 오탐인지 확인 |
 | `[lidar] ACTION restart lidar.service (step 1, attempt 1, total 1)` | 실제 재시작 중 | 10초 뒤 결과 확인 |
@@ -402,9 +406,10 @@ sensor_msgs 의 PointCloud2, Image, CompressedImage, NavSatFix, Imu 모두 첫 �
 `ACT` 판정이 나도 바로 재시작하지 않습니다.
 
 1. **고장 종류가 행동 대상인가.** 확실한 끊김(`act_on_faults`)은 2초, 애매한 고장(`act_on_faults_slow`)은 5초 지속돼야 행동. 둘 다 아니면 `MONITOR_ONLY`.
-2. **공통 원인이 아닌가.** `common_cause_window_sec`(3초) 안에 `common_cause_min`(3개) 이상 센서가 함께 죽었으면 `BLOCKED_COMMON_CAUSE`. 네트워크나 호스트 문제에 센서를 재시작해 봐야 소용없기 때문입니다.
-3. **안전 게이트가 허용했는가.** `gate_topic` 을 설정하면 그 값(예: 기어 P)이 맞을 때만. 단, 고장이 `gate_bypass_after_sec` 이상 계속되면 게이트를 무시합니다. 기본값은 `fault_hold_sec` 와 같아서 "확실히 끊긴 센서는 기어와 무관하게 재시작"됩니다.
-4. **`dry_run` 이 꺼져 있는가.** 켜져 있으면 `DRY_RUN_WOULD_*` 만 기록.
+2. **공통 원인이 아닌가.** `common_cause_window_sec`(3초) 안에 `common_cause_min`(기본 2개) 이상의 **복구 단위**(systemd 유닛)가 함께 죽었으면 `BLOCKED_COMMON_CAUSE`. 센서 수가 아니라 유닛 수로 셉니다. 라이다 4대가 `lidar.service` 하나에서 돌면 넷이 같이 죽어도 1개로 셉니다. 그건 그 유닛의 고장이지 공통 원인이 아니기 때문입니다. 반대로 라이다 유닛과 GPS 유닛이 같이 죽으면 IPC·DDS·네트워크 문제로 보고 재시작하지 않습니다.
+3. **같은 유닛을 다른 센서가 이미 재시작 중이 아닌가.** 진행 중이면 `WAIT_SHARED_ACTION` 으로 기다립니다. 재시작이 끝나면 그 유닛의 모든 센서가 함께 유예(GRACE)를 받습니다.
+4. **안전 게이트가 허용했는가.** `gate_topic` 을 설정하면 그 값(예: 기어 P)이 맞을 때만. 단, 고장이 `gate_bypass_after_sec` 이상 계속되면 게이트를 무시합니다. 기본값은 `fault_hold_sec` 와 같아서 "확실히 끊긴 센서는 기어와 무관하게 재시작"됩니다.
+5. **`dry_run` 이 꺼져 있는가.** 켜져 있으면 `DRY_RUN_WOULD_*` 만 기록.
 
 ### 5. 복구 사다리
 
@@ -460,13 +465,14 @@ values: fault, state, rx_hz, age_sec, rx_count, step, attempts_at_step, total_ac
 | `raw_log_dir` | `~/.local/state/sensor_watchdog` | 원시 CSV 와 events.csv 위치. `""` 면 끔 |
 | `gate_topic` | `""` | 재시작 허가 토픽. `""` 면 항상 허용 |
 | `gate_type` | `std_msgs/msg/Bool` | 게이트 토픽 타입 |
-| `gate_has_header` | `false` | 게이트 메시지 첫 필드가 `std_msgs/Header` 인가 |
-| `gate_field_bytes` | `1` | 헤더 다음 첫 필드 크기 (1, 2, 4, 8) |
+| `gate_prefix` | `none` | 첫 정수 필드 앞에 오는 것. `none`(바로 정수), `stamp`(`builtin_interfaces/Time` 하나), `header`(`std_msgs/Header`). autoware `GearReport` 는 `stamp` |
+| `gate_has_header` | `false` | (구버전 호환) `gate_prefix` 가 없을 때만 쓰임. `true` 면 `header` |
+| `gate_field_bytes` | `1` | prefix 다음 첫 필드 크기 (1, 2, 4, 8) |
 | `gate_ok_value` | `1` | 이 값이면 허용 |
 | `gate_reliable` | `true` | 게이트 구독 QoS |
 | `gate_timeout_sec` | `1.0` | 이 시간 안에 게이트 메시지가 와야 유효 |
 | `gate_bypass_after_sec` | `2.0` | 고장이 이만큼 지속되면 게이트 무시. 음수면 항상 게이트 따름 |
-| `common_cause_min` | `3` | 이 개수 이상 동시 고장이면 공통 원인 |
+| `common_cause_min` | `3` (ipc.yaml 은 `2`) | 이 개수 이상의 복구 단위(유닛)가 동시 고장이면 공통 원인. 유닛 수와 같게 두면 "전부 죽었을 때만" |
 | `common_cause_window_sec` | `3.0` | "동시"의 기준 |
 | `action_timeout_sec` | `30.0` | 한 행동에 허용하는 최대 시간 |
 | `systemctl_cmd` | `["systemctl", "--user"]` | 서비스 재시작 명령 앞부분. 시스템 유닛이면 `["sudo", "-n", "systemctl"]` |
@@ -522,6 +528,15 @@ values: fault, state, rx_hz, age_sec, rx_count, step, attempts_at_step, total_ac
 
 적어두고 나중에 원시 로그와 비교합니다. 맞으면 설정값에 근거가 생기고, 틀리면 뭘 몰랐는지 알게 됩니다.
 
+bag1512 재생으로 이미 실측한 값은 다음과 같습니다. 실차에서 다시 재면 이 표와 비교합니다.
+
+| 센서 | 토픽 | 실측 주기 | 최대 간격 | 메시지 크기 | `timeout_sec` | `min_hz` | `min_bytes` |
+|---|---|---|---|---|---|---|---|
+| front_m1p, rear_m1p | `/*_m1p/rslidar_points` | 10.03 Hz | 100 ms | 1,260,156 B 고정 | 1.0 | 5.0 | 600000 |
+| left_bp, right_bp | `/*_bp/rslidar_points` | 10.03 Hz | 100 ms | 921,75x B 고정 | 1.0 | 5.0 | 450000 |
+| gps | `/fix` | 20.05 Hz | 100 ms | 128 B 고정 | 1.0 | 10.0 | 100 |
+
+
 ### 2. 기본 동작을 실측한다 (각 5분, 스톱워치)
 
 1. `systemctl --user restart lidar` 후 `ros2 topic hz` 가 다시 뜨기까지 몇 초인가 → `startup_grace_sec` 근거
@@ -550,26 +565,36 @@ systemctl --user restart sensor-watchdog
 
 ## 안전 게이트 설정
 
-차량 쪽 코드를 고치지 않고 기존 토픽(예: 기어 상태)을 그대로 씁니다.
+차량 쪽 코드를 고치지 않고 기존 토픽을 그대로 씁니다. 실차에서는 autoware 의 기어 상태를 씁니다.
 
 ```bash
-ros2 topic type /ad_can/gear              # 예: ad_can_msgs/msg/Gear
-ros2 interface show ad_can_msgs/msg/Gear  # 첫 필드 타입과 P 에 해당하는 상수
-ros2 topic echo /ad_can/gear --once       # 실제 값
+ros2 topic type /vehicle/status/gear_status            # autoware_vehicle_msgs/msg/GearReport
+ros2 interface show autoware_vehicle_msgs/msg/GearReport
+#   builtin_interfaces/Time stamp     ← std_msgs/Header 가 아니라 stamp 만 있음 → gate_prefix: stamp
+#   uint8 report                      ← PARK = 22
+ros2 topic echo /vehicle/status/gear_status --once     # 실제 값
 ```
 
 ```yaml
-gate_topic: /ad_can/gear
-gate_type: ad_can_msgs/msg/Gear
-gate_has_header: false        # 첫 줄이 std_msgs/Header 면 true
-gate_field_bytes: 1           # 기어 필드가 uint8 이면 1, int32 면 4
-gate_ok_value: 0              # P 에 해당하는 값
+gate_topic: /vehicle/status/gear_status
+gate_type: autoware_vehicle_msgs/msg/GearReport
+gate_prefix: stamp            # none: 바로 정수 / stamp: Time 하나 뒤 / header: std_msgs/Header 뒤
+gate_field_bytes: 1           # report 가 uint8
+gate_ok_value: 22             # PARK
 gate_reliable: true           # ros2 topic info --verbose 의 Reliability 와 맞춤
 ```
 
-제약: 기어 값이 (헤더를 제외하고) 메시지의 **첫 번째 필드**여야 합니다. 다른 위치면 `src/watchdog.cpp` 의 게이트 파싱을 그 타입에 맞게 바꿔야 합니다.
+`gate_prefix` 를 잘못 주면 증상이 이렇습니다.
 
-게이트 판정 결과는 `/diagnostics` 요약 항목의 `gate` 값에서 볼 수 있습니다 (`allowed value=0`, `blocked value=3`, `no message (blocked)`).
+| 설정 | 결과 |
+|---|---|
+| `stamp` (정답) | `allowed value=22` |
+| `none` | stamp 의 첫 바이트를 읽어 엉뚱한 값. 거의 항상 `blocked` |
+| `header` | report 값을 frame_id 길이로 읽어 파싱 실패. `no message (blocked)` 처럼 보임 |
+
+제약: 기어 값이 (prefix 를 제외하고) 메시지의 **첫 번째 필드**여야 합니다. 다른 위치면 `include/sensor_watchdog/cdr_header.hpp` 의 `read_first_int` 를 그 타입에 맞게 바꿔야 합니다.
+
+게이트 판정 결과는 `/diagnostics` 요약 항목의 `gate` 값에서 볼 수 있습니다 (`allowed value=22`, `blocked value=2`, `no message (blocked)`).
 
 ---
 
@@ -644,13 +669,19 @@ colcon 으로는 `colcon test --packages-select sensor_watchdog`.
 ## 검증 범위와 한계
 
 **검증됨**
-- `test/test_health.cpp` 전부 통과 (g++ 16, Windows)
-- `src/watchdog.cpp` 문법 검사 통과 (모의 rclcpp 헤더 사용)
+- `test/test_health.cpp` 전부 통과 (colcon test, Ubuntu / ROS 2 Humble)
+- ROS 2 Humble 에서 `colcon build` 통과 (rmw_cyclonedds_cpp)
+- `config/ipc.yaml` 로 노드 기동, 모의 발행자로 `/diagnostics` 발행 확인. 실제 `autoware_vehicle_msgs/GearReport` 메시지(report=22)에서 게이트가 `allowed value=22` 로 읽힘
+- 라이다 4대가 `lidar.service` 한 복구 단위로 묶이고, 라이다 유닛 + GPS 유닛 동시 고장이 `BLOCKED_COMMON_CAUSE` 로 판정됨
+- 실차 rosbag(bag1512, 2026-09-17 주행 264초) 재생 시험 (dry_run):
+  - 전체 재생 60초: 5개 센서 모두 유예 10초 뒤 `HEALTHY`. 게이트는 주행 중(기어 DRIVE=2)이라 `blocked value=2` 로 올바르게 읽힘. 재생이 끝나 전부 끊기면 `BLOCKED_COMMON_CAUSE`
+  - `/front_m1p/rslidar_points` 만 빼고 재생: front_m1p 만 `NO_PUBLISHER` → 2초 뒤 `DRY_RUN_WOULD_service`. 나머지 넷은 `HEALTHY`, 공통 원인으로 잘못 막히지 않음
+  - 원시 로그 실측: 라이다 4대 10.03 Hz(최대 간격 100 ms, 크기 고정), GPS 20.05 Hz(128 B 고정), 타임스탬프 전부 단조 증가. 이 값으로 `ipc.yaml` 의 `min_hz`, `min_bytes` 를 정함
 
 **검증 안 됨**
-- 실제 ROS 2 Humble 환경에서 colcon 빌드. 모의 헤더와 실제 API 가 다른 부분이 있으면 첫 빌드에서 컴파일 오류가 날 수 있습니다. 특히 `create_generic_subscription` 과 lifecycle 서비스 콜백 부분
-- systemd 유닛의 실제 동작
-- 실제 센서, 실차
+- systemd 유닛의 실제 동작 (실제 `systemctl restart` 호출)
+- 실제 센서, 실차. 재시작 활성화 전에 [실제 재시작을 켜기 전 절차](#실제-재시작을-켜기-전-절차) 를 반드시 거칠 것
+- 카메라 토픽 (bag 에 없음)
 
 **설계상 검출하지 않는 것**
 - 메시지는 정상이나 내용이 쓸모없는 경우 (역광으로 날아간 영상, 눈 덮인 라이다, 멀티패스 GPS). 원시 로그에서 사례가 확인되면 그때 추가합니다

@@ -43,7 +43,7 @@ box(21, 60, 13, 12, "white", E_SENSOR, title="GPS", body="/fix\n초당 20번\n\n
 box(35.5, 60, 13, 12, "white", E_SENSOR, title="카메라", body="Jetson Orin\n(SSH로 관리)\n\ncam.service", tfs=12, bfs=9.5, ls="--")
 
 # 기어 토픽
-box(3, 44, 20, 9.5, "white", "#6b7280", title="차량 기어 상태", body="/vehicle/status/gear_status\nP단이면 22", tfs=11.5, bfs=9, ls="--")
+box(3, 44, 20, 9.5, "white", "#6b7280", title="차량 기어 상태", body="/vehicle/status/gear_status\n(테스트 중이라 지금은 안 봄)", tfs=11.5, bfs=9, ls="--")
 
 # ---------- 2. 와치독 ----------
 box(56, 18, 46, 60, C_WD, E_WD)
@@ -55,7 +55,7 @@ steps = [
     ("참는다",
      "잠깐 끊긴 건 무시.  끊김 2초 / 느림 5초 이상\n계속돼야 \"고장\"으로 확정"),
     ("안전한지 본다",
-     "차가 P단인가?  (아니면 기다림)\n한 유닛의 센서가 한꺼번에 죽었나?  → 한 번만 재시작\n방금 재시작한 센서인가?  → 돌아올 때까지 기다림"),
+     "차가 P단인가?  ← 테스트 중이라 꺼 둠 (gate_topic: \"\")\n한 유닛의 센서가 한꺼번에 죽었나?  → 한 번만 재시작\n방금 재시작한 센서인가?  → 돌아올 때까지 기다림"),
     ("복구 사다리  (한 칸씩 올라감)",
      "1) 노드 lifecycle 재시작  →  2) 프로세스 껐다 켬  →  3) 전원\n몇 번 해도 안 되면 포기하고 \"EXHAUSTED\" 로 보고"),
 ]
@@ -81,7 +81,7 @@ box(108, 50, 18, 10.5, "white", E_OUT, title="CSV 로그", body="메시지마다
 
 # ---------- 화살표 ----------
 arrow((51, 68), (56, 68), color=E_SENSOR, lw=2.6, label="토픽 (데이터가 계속 흘러옴)", lx=13, ly=3.5, fs=10)
-arrow((23, 48.8), (59, 42.5), color="#6b7280", lw=1.8, label="P단인지 확인", lx=-6, ly=1.5, fs=9.5, conn="arc3,rad=0.15")
+arrow((23, 48.8), (59, 42.5), color="#6b7280", lw=1.8, label="P단 확인 (꺼 둠)", lx=-6, ly=1.5, fs=9.5, conn="arc3,rad=0.15")
 arrow((99, 40), (108, 55.5), color=E_OUT, lw=2.2, conn="arc3,rad=-0.25")
 arrow((99, 66), (108, 67.5), color=E_OUT, lw=2.2, label="상태 보고", ly=2, fs=9.5)
 # 와치독 -> systemd : 재시작 요청
@@ -98,7 +98,7 @@ ax.text(117, 43.2, "예: 앞 라이다가 멈추면", ha="center", va="top", fon
 ax.text(108, 38.5,
         "0초   데이터 끊김\n"
         "2초   \"고장\" 확정\n"
-        "        P단 확인  → OK\n"
+        "        (P단 확인은 꺼 둠)\n"
         "        다른 라이다 3대는 멀쩡\n"
         "        → 앞 라이다 문제로 판단\n"
         "3초   systemd 에 재시작 요청\n"

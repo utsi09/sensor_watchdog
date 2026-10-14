@@ -34,7 +34,9 @@
     #   autoware_vehicle_msgs/msg/GearReport = { builtin_interfaces/Time stamp; uint8 report }
     #   std_msgs/Header 가 아니라 stamp 만 앞에 있으므로 gate_prefix 는 "stamp".
     #   report 상수: NEUTRAL=1, DRIVE=2, REVERSE=20, PARK=22, LOW=23
-    gate_topic: /vehicle/status/gear_status
+    # 테스트 중이라 게이트를 꺼 둔다(""): 기어가 D단이어도 바로 껐다 켠다.
+    # 상용화 전에 켜려면 "" 를 /vehicle/status/gear_status 로 바꾸면 된다. 아래 설정은 그대로 둔다.
+    gate_topic: ""
     gate_type: autoware_vehicle_msgs/msg/GearReport
     gate_prefix: stamp          # none | stamp | header
     gate_field_bytes: 1         # uint8 report

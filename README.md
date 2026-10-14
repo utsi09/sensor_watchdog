@@ -2,6 +2,10 @@
 
 ROS 2 Humble 용 센서 감시·자동 복구 노드입니다. 라이다, GPS, 카메라 같은 센서 토픽이 끊기면 알아채고, 정해진 조건에서만 센서 프로세스를 껐다 켜며, 센서 상태를 `/diagnostics` 로 계속 알립니다.
 
+![sensor_watchdog 한눈에 보기](docs/overview.png)
+
+> 그림 다시 만들기: `python3 docs/overview.py` (NanumGothic 계열 폰트 필요)
+
 - 센서 프로세스 관리는 리눅스 기본 관리자인 **systemd** 에 맡깁니다. 별도 셸 스크립트 없음.
 - 와치독은 IPC 한 대에만 올립니다. 원격 장비(Jetson Orin 등)의 센서는 SSH 로 그 장비의 systemd 를 호출해 재시작합니다. 원격 장비엔 빌드가 필요 없습니다.
 - 처음엔 **감지 전용 모드**(`dry_run: true`)로 돌려서 오탐이 얼마나 되는지 확인한 뒤에 실제 재시작을 켭니다.

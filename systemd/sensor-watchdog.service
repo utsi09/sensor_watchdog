@@ -12,7 +12,9 @@ WatchdogSec=5
 # 장비마다 CONFIG 를 ipc.yaml / orin.yaml 로, NODE 를 watchdog_ipc / watchdog_orin 으로
 Environment=CONFIG=%h/.config/sensor_watchdog/watchdog.yaml
 Environment=NODE=watchdog_ipc
-ExecStart=/bin/bash -c 'source %h/.config/sensor_watchdog/env.bash && source %h/watchdog_ws/install/setup.bash && exec ros2 run sensor_watchdog watchdog_node --ros-args -r __node:=$NODE --params-file $CONFIG'
+# 주의: `exec ros2 run ...` 을 쓰면 안 된다. ros2 CLI(파이썬)가 메인 PID 가 되고 와치독은 그 자식이 되어
+# NotifyAccess=main 이 READY/WATCHDOG 신호를 거부한다 → 기동 타임아웃 → 무한 재시작. 바이너리를 직접 exec 한다.
+ExecStart=/bin/bash -c 'source %h/.config/sensor_watchdog/env.bash && source %h/watchdog_ws/install/setup.bash && exec "$(ros2 pkg prefix sensor_watchdog)/lib/sensor_watchdog/watchdog_node" --ros-args -r __node:=$NODE --params-file $CONFIG'
 
 KillSignal=SIGINT
 TimeoutStopSec=10

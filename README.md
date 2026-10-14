@@ -683,8 +683,14 @@ colcon 으로는 `colcon test --packages-select sensor_watchdog`.
   - `/front_m1p/rslidar_points` 만 빼고 재생: front_m1p 만 `NO_PUBLISHER` → 2초 뒤 `DRY_RUN_WOULD_service`. 나머지 넷은 `HEALTHY`, 공통 원인으로 잘못 막히지 않음
   - 원시 로그 실측: 라이다 4대 10.03 Hz(최대 간격 100 ms, 크기 고정), GPS 20.05 Hz(128 B 고정), 타임스탬프 전부 단조 증가. 이 값으로 `ipc.yaml` 의 `min_hz`, `min_bytes` 를 정함
 
+- systemd 실제 동작 (이 PC 의 user systemd 에 시험용 유닛을 올려 확인):
+  - 와치독을 `Type=notify`, `WatchdogSec=5` 유닛으로 기동. READY/WATCHDOG 신호가 systemd 에 닿아 `WatchdogTimestamp` 가 0.2초마다 전진
+  - 라이다 중계 유닛의 데이터를 멈추자 3초 뒤 와치독이 실제 `systemctl --user restart` 를 호출. 유닛 PID 가 바뀌고 0.4초 만에 완료, 유예 10초 뒤 4대 모두 `recovered` (고장 시작 후 12.6초)
+  - 와치독 프로세스를 SIGSTOP 으로 얼리자 systemd 가 WatchdogSec 으로 죽이고 자동 재시작
+  - **발견한 버그**: 유닛에 `exec ros2 run ...` 을 쓰면 ros2 CLI 가 메인 PID 가 되어 `NotifyAccess=main` 이 신호를 거부하고 기동 타임아웃 → 무한 재시작. `systemd/sensor-watchdog.service` 를 바이너리 직접 exec 으로 고쳤다
+
 **검증 안 됨**
-- systemd 유닛의 실제 동작 (실제 `systemctl restart` 호출)
+- 실제 rslidar / GPS 드라이버 유닛의 종료·기동 시간 (`ros2 launch` 가 SIGINT 로 자식까지 10초 안에 정리되는지, 드라이버가 유예 10초 안에 토픽을 다시 내는지)
 - 실제 센서, 실차. 재시작 활성화 전에 [실제 재시작을 켜기 전 절차](#실제-재시작을-켜기-전-절차) 를 반드시 거칠 것
 - 카메라 토픽 (bag 에 없음)
 

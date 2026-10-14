@@ -4,8 +4,6 @@ ROS 2 Humble 용 센서 감시·자동 복구 노드입니다. 라이다, GPS, �
 
 ![sensor_watchdog 한눈에 보기](docs/overview.png)
 
-> 그림 다시 만들기: `python3 docs/overview.py` (NanumGothic 계열 폰트 필요)
-
 - 센서 프로세스 관리는 리눅스 기본 관리자인 **systemd** 에 맡깁니다. 별도 셸 스크립트 없음.
 - 와치독은 IPC 한 대에만 올립니다. 원격 장비(Jetson Orin 등)의 센서는 SSH 로 그 장비의 systemd 를 호출해 재시작합니다. 원격 장비엔 빌드가 필요 없습니다.
 - 처음엔 **감지 전용 모드**(`dry_run: true`)로 돌려서 오탐이 얼마나 되는지 확인한 뒤에 실제 재시작을 켭니다.
@@ -415,7 +413,7 @@ sensor_msgs 의 PointCloud2, Image, CompressedImage, NavSatFix, Imu 모두 첫 �
 1. **고장 종류가 행동 대상인가.** 확실한 끊김(`act_on_faults`)은 2초, 애매한 고장(`act_on_faults_slow`)은 5초 지속돼야 행동. 둘 다 아니면 `MONITOR_ONLY`.
 2. **공통 원인이 아닌가.** `common_cause_window_sec`(3초) 안에 `common_cause_min`(기본 2개) 이상의 **복구 단위**(systemd 유닛)가 함께 죽었으면 `BLOCKED_COMMON_CAUSE`. 센서 수가 아니라 유닛 수로 셉니다. 라이다 4대가 `lidar.service` 하나에서 돌면 넷이 같이 죽어도 1개로 셉니다. 그건 그 유닛의 고장이지 공통 원인이 아니기 때문입니다. 반대로 라이다 유닛과 GPS 유닛이 같이 죽으면 IPC·DDS·네트워크 문제로 보고 재시작하지 않습니다.
 3. **같은 유닛을 다른 센서가 이미 재시작 중이 아닌가.** 진행 중이면 `WAIT_SHARED_ACTION` 으로 기다립니다. 재시작이 끝나면 그 유닛의 모든 센서가 함께 유예(GRACE)를 받습니다.
-4. **안전 게이트가 허용했는가.** `gate_topic` 을 설정하면 그 값(예: 기어 P)이 맞을 때만. 단, 고장이 `gate_bypass_after_sec` 이상 계속되면 게이트를 무시합니다. 기본값은 `fault_hold_sec` 와 같아서 "확실히 끊긴 센서는 기어와 무관하게 재시작"됩니다.
+4. **안전 게이트가 허용했는가.** `gate_topic` 을 설정하면 그 값(예: 기어 P)이 맞을 때만 재시작하고, 아니면 `BLOCKED_GATE` 로 기다립니다. 주행 중에 라이다 유닛을 껐다 켜면 멀쩡한 라이다 3대까지 10초 넘게 사라지기 때문입니다. 주행 중이라도 일정 시간 지나면 재시작하게 하려면 `gate_bypass_after_sec` 에 초를 줍니다(기본 -1.0 = 항상 게이트 따름. YAML 에서는 소수점을 붙여야 double 로 읽힘).
 5. **`dry_run` 이 꺼져 있는가.** 켜져 있으면 `DRY_RUN_WOULD_*` 만 기록.
 
 ### 5. 복구 사다리
@@ -480,7 +478,7 @@ values: fault, faults, state, rx_hz, age_sec, rx_count, step, attempts_at_step, 
 | `gate_ok_value` | `1` | 이 값이면 허용 |
 | `gate_reliable` | `true` | 게이트 구독 QoS |
 | `gate_timeout_sec` | `1.0` | 이 시간 안에 게이트 메시지가 와야 유효 |
-| `gate_bypass_after_sec` | `2.0` | 고장이 이만큼 지속되면 게이트 무시. 음수면 항상 게이트 따름 |
+| `gate_bypass_after_sec` | `-1.0` | 음수면 항상 게이트 따름. 양수면 고장이 이만큼 지속될 때 게이트 무시 |
 | `common_cause_min` | `3` (ipc.yaml 은 `2`) | 이 개수 이상의 복구 단위(유닛)가 동시 고장이면 공통 원인. 유닛 수와 같게 두면 "전부 죽었을 때만" |
 | `common_cause_window_sec` | `3.0` | "동시"의 기준 |
 | `action_timeout_sec` | `30.0` | 한 행동에 허용하는 최대 시간 |

@@ -19,10 +19,9 @@
     gate_ok_value: 22           # PARK
     gate_reliable: true
     gate_timeout_sec: 1.0
-    # 고장이 이 시간 이상 계속되면 게이트를 무시하고 바로 복구한다. 기본값은 fault_hold_sec 와 같아서
-    # "확실히 끊긴 센서"는 기어와 무관하게 재시작된다. 기어를 기다리게 하려면 이 값을 키운다.
-    # 짧은 끊김(오탐)만 게이트가 막는다. 음수면 항상 게이트를 따른다.
-    gate_bypass_after_sec: 2.0
+    # -1: 항상 게이트를 따른다 (주행 중엔 BLOCKED_GATE 로 기다리고 P단이 되면 재시작).
+    # 양수(예: 30): 고장이 그 시간 이상 계속되면 주행 중이라도 재시작한다.
+    gate_bypass_after_sec: -1.0
 
     # 센서가 하나뿐이라 공통 원인 판정은 사실상 비활성(2개 이상 필요)
     common_cause_min: 2

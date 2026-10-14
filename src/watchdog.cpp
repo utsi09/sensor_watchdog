@@ -296,7 +296,7 @@ public:
         gate_ok_value_ = declare_parameter<int>("gate_ok_value", 1);
         gate_timeout_ = declare_parameter<double>("gate_timeout_sec", 1.0);
         // 고장이 이 시간 이상 지속되면 게이트를 무시하고 복구한다. 음수면 항상 게이트를 따른다.
-        gate_bypass_after_ = declare_parameter<double>("gate_bypass_after_sec", 2.0);
+        gate_bypass_after_ = declare_parameter<double>("gate_bypass_after_sec", -1.0);
         gate_reliable_ = declare_parameter<bool>("gate_reliable", true);
 
         if (gate_field_bytes_ != 1 && gate_field_bytes_ != 2 &&
@@ -943,7 +943,7 @@ private:
     int gate_ok_value_ = 1;
     bool gate_reliable_ = true;
     double gate_timeout_ = 1.0;
-    double gate_bypass_after_ = 5.0;
+    double gate_bypass_after_ = -1.0;
     int common_cause_min_ = 3;
     double common_cause_window_ = 3.0;
     double action_timeout_ = 30.0;

@@ -67,6 +67,17 @@ inline const char *to_string(Fault f)
     return "?";
 }
 
+// "A+B+C" 형태로 합친다. 비어 있으면 "NONE".
+inline std::string join_faults(const std::vector<Fault> &faults)
+{
+    if (faults.empty())
+        return "NONE";
+    std::string out;
+    for (Fault f : faults)
+        out += std::string(out.empty() ? "" : "+") + to_string(f);
+    return out;
+}
+
 // ROS 그래프에서 본 정보. 노드 쪽에서 채워서 넘긴다.
 struct GraphView
 {
@@ -126,42 +137,57 @@ public:
         trim(now);
     }
 
-    Fault diagnose(double now, const GraphView &g)
+    // 지금 해당되는 고장을 전부, 심한 것부터 순서대로 돌려준다.
+    // - 그래프 고장(노드/발행자 없음)과 수신 끊김은 데이터가 없는 상태라 그것 하나만 돌려준다.
+    //   (데이터가 없으면 stamp·주기·크기 검사는 의미가 없다)
+    // - 데이터가 오고 있으면 stamp 이상, 주기 저하, 크기 미달을 모두 모은다. 하나만 고르면
+    //   "기록만 하는 고장"(TOO_SMALL, STAMP_AGE)이 재시작 대상 고장을 가릴 수 있기 때문이다.
+    // - TOO_SMALL 은 가장 뒤. 빈 클라우드는 보통 다른 증상과 같이 오고, 그 증상이 더 중요하다.
+    std::vector<Fault> diagnose_all(double now, const GraphView &g)
     {
         trim(now);
 
         if (g.node_checked && !g.node_visible)
-            return Fault::NODE_NOT_VISIBLE;
+            return {Fault::NODE_NOT_VISIBLE};
 
         if (g.publishers == 0)
-            return Fault::NO_PUBLISHER;
+            return {Fault::NO_PUBLISHER};
 
         if (g.matched == 0)
-            return Fault::NO_MATCHED_PUBLISHER;
+            return {Fault::NO_MATCHED_PUBLISHER};
 
         if (!received_ || now - last_rx_ > cfg_.timeout_sec)
-            return Fault::RX_TIMEOUT;
+            return {Fault::RX_TIMEOUT};
 
-        if (too_small_)
-            return Fault::TOO_SMALL;
+        std::vector<Fault> out;
 
         if ((cfg_.check_stamp_progress || cfg_.check_stamp_age) && stamp_bad_)
-            return Fault::STAMP_INVALID;
+            out.push_back(Fault::STAMP_INVALID);
 
         if (cfg_.check_stamp_age && (age_ > cfg_.max_age_sec || age_ < -0.1))
-            return Fault::STAMP_AGE;
+            out.push_back(Fault::STAMP_AGE);
 
         if (cfg_.check_stamp_progress && now - last_advance_ > cfg_.stamp_timeout_sec)
-            return Fault::STAMP_NOT_ADVANCING;
+            out.push_back(Fault::STAMP_NOT_ADVANCING);
 
         if (cfg_.min_hz > 0.0 &&
             now - reset_at_ >= cfg_.hz_window_sec &&
             hz(now) < cfg_.min_hz)
         {
-            return Fault::LOW_HZ;
+            out.push_back(Fault::LOW_HZ);
         }
 
-        return Fault::NONE;
+        if (too_small_)
+            out.push_back(Fault::TOO_SMALL);
+
+        return out;
+    }
+
+    // 가장 심한 고장 하나. 없으면 NONE.
+    Fault diagnose(double now, const GraphView &g)
+    {
+        const auto all = diagnose_all(now, g);
+        return all.empty() ? Fault::NONE : all.front();
     }
 
     double hz(double now)

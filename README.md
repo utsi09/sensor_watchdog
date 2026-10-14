@@ -371,22 +371,25 @@ sensor_msgs 의 PointCloud2, Image, CompressedImage, NavSatFix, Imu 모두 첫 �
 - 메시지 안의 타임스탬프
 - 바이트 크기
 
-### 2. 판정: 0.2초마다 10가지 검사
+### 2. 판정: 0.2초마다 9가지 검사
 
-위에서부터 순서대로 보고, 처음 걸리는 것 하나만 보고합니다.
+위에서부터 순서대로 봅니다. 1~4 는 "데이터가 없다"는 뜻이라 걸리면 그것 하나만 보고하고 끝냅니다. 데이터가 오고 있으면 5~9 를 **모두** 검사해서 해당되는 고장을 전부 모읍니다.
 
 ```
 1. 노드가 그래프에 있나?          (node_name 설정 시)
 2. 발행자가 있나?
 3. 내 구독과 매칭됐나?            (QoS/타입)
 4. timeout_sec 안에 메시지 왔나?   ← "끊김"의 핵심
-5. 크기가 min_bytes 이상인가?
-6. 타임스탬프가 정상인가?
-7. 타임스탬프가 너무 오래되지 않았나? (check_stamp_age 켰을 때)
-8. 타임스탬프가 전진하나?
-9. 수신 주기가 min_hz 이상인가?
+---- 여기부터는 해당되는 것 전부 ----
+5. 타임스탬프가 정상인가?
+6. 타임스탬프가 너무 오래되지 않았나? (check_stamp_age 켰을 때)
+7. 타임스탬프가 전진하나?
+8. 수신 주기가 min_hz 이상인가?
+9. 크기가 min_bytes 이상인가?      ← 가장 뒤. 기록만 하는 고장이라 다른 고장을 가리면 안 됨
 → 전부 통과하면 HEALTHY
 ```
+
+재시작 여부는 모인 고장 중 **하나라도** 행동 대상이면 결정됩니다(OR). 로그와 `/diagnostics` 의 `fault` 에는 행동 대상 중 가장 앞의 고장이, `faults` 에는 전부가 `A+B` 꼴로 실립니다. 예를 들어 드라이버가 빈 클라우드를 같은 타임스탬프로 반복하면 `fault=STAMP_NOT_ADVANCING`, `faults=STAMP_NOT_ADVANCING+TOO_SMALL` 로 보고하고 재시작합니다. 크기만 작고 나머지가 정상이면 `TOO_SMALL` 만 남아 기록만 합니다.
 
 ### 3. "끊겼다"의 정의
 
@@ -434,7 +437,7 @@ lifecycle  →  service  →  power  →  EXHAUSTED
 name: "watchdog_ipc: lidar"
 level: 0=OK, 1=WARN(유예 중), 2=ERROR(고장)
 message: "HOLDING: RX_TIMEOUT"
-values: fault, state, rx_hz, age_sec, rx_count, step, attempts_at_step, total_actions, exhausted, dry_run
+values: fault, faults, state, rx_hz, age_sec, rx_count, step, attempts_at_step, total_actions, exhausted, dry_run
 ```
 
 플래너는 `level` 만 보면 됩니다. `ERROR` 면 그 센서를 지금 쓰면 안 됩니다.
@@ -445,6 +448,7 @@ values: fault, state, rx_hz, age_sec, rx_count, step, attempts_at_step, total_ac
 
 - `<센서>.csv`: 메시지마다 한 줄. `steady, ros_now, stamp_ns, bytes`. 임계값을 실측으로 정할 때 씁니다.
 - `events.csv`: 상태 변화, 행동 시작·종료, 복구까지 걸린 시간, 게이트 우회.
+- 두 종류 모두 `raw_log_max_mb`(기본 100 MB)를 넘으면 `.1` 백업 하나만 남기고 새로 시작합니다. 센서 5개 기준 원시 로그는 약 240 MB/일이라 상한 없이 두면 한 달에 7 GB 가 쌓입니다.
 
 ### 8. 와치독 자체 감시
 
@@ -463,6 +467,7 @@ values: fault, state, rx_hz, age_sec, rx_count, step, attempts_at_step, total_ac
 |---|---|---|
 | `dry_run` | `true` | true 면 판정·기록만 하고 행동 안 함 |
 | `raw_log_dir` | `~/.local/state/sensor_watchdog` | 원시 CSV 와 events.csv 위치. `""` 면 끔 |
+| `raw_log_max_mb` | `100.0` | 파일당 크기 상한. 넘으면 `<파일>.1` 백업 하나만 남기고 새로 시작. 디스크 최대 (센서 수+1)×2×이 값. `0` 이면 무제한 |
 | `gate_topic` | `""` | 재시작 허가 토픽. `""` 면 항상 허용 |
 | `gate_type` | `std_msgs/msg/Bool` | 게이트 토픽 타입 |
 | `gate_prefix` | `none` | 첫 정수 필드 앞에 오는 것. `none`(바로 정수), `stamp`(`builtin_interfaces/Time` 하나), `header`(`std_msgs/Header`). autoware `GearReport` 는 `stamp` |

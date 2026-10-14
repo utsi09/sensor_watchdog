@@ -25,6 +25,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -187,6 +188,33 @@ private:
     sockaddr_in addr_{};
 };
 
+// CSV 로그를 append 로 연다. 비어 있으면 헤더를 쓴다.
+bool open_csv(std::ofstream &f, const std::string &path, const char *header)
+{
+    f.open(path, std::ios::app);
+    if (!f)
+        return false;
+    if (f.tellp() == 0)
+        f << header << '\n';
+    return true;
+}
+
+// 파일이 max_bytes 를 넘으면 <path>.1 로 밀어내고(이전 .1 은 덮어씀) 새로 시작한다.
+// 디스크 사용량은 파일당 최대 2 × max_bytes 로 묶인다.
+void rotate_csv(std::ofstream &f, const std::string &path, const char *header, uint64_t max_bytes)
+{
+    if (!f.is_open() || max_bytes == 0)
+        return;
+    if (static_cast<uint64_t>(f.tellp()) < max_bytes)
+        return;
+    f.close();
+    std::rename(path.c_str(), (path + ".1").c_str());
+    open_csv(f, path, header);
+}
+
+constexpr const char *RAW_HEADER = "steady,ros_now,stamp_ns,bytes";
+constexpr const char *EVENTS_HEADER = "wall,steady,sensor,event,fault,step,code,detail";
+
 // 진행 중인 복구 행동. result < 0 이면 아직 진행 중.
 struct Action
 {
@@ -219,8 +247,10 @@ struct Sensor
 
     std::optional<Action> action;
     std::ofstream raw;
+    std::string raw_path;
 
     std::string state;             // 마지막으로 보고한 상태 문자열
+    std::string faults = "NONE";   // 지금 해당되는 고장 전부 ("A+B")
     Fault fault = Fault::NONE;
     double fault_started = -1.0;   // 복구 시간 측정용
 
@@ -239,6 +269,11 @@ public:
 
         raw_log_dir_ = expand_home(
             declare_parameter<std::string>("raw_log_dir", "~/.local/state/sensor_watchdog"));
+        // 원시 CSV 와 events.csv 의 파일당 크기 상한(MB). 넘으면 .1 백업 하나만 남기고 새로 시작.
+        // 센서 5개 기준 원시 로그는 약 240 MB/일 이므로 기본 100 MB 면 파일당 반나절치가 남는다.
+        // 디스크 사용 최대치 = (센서 수 + 1) × 2 × 이 값. 0 이면 상한 없음.
+        raw_log_max_bytes_ = static_cast<uint64_t>(
+            std::max(0.0, declare_parameter<double>("raw_log_max_mb", 100.0)) * 1024.0 * 1024.0);
 
         // 안전 게이트: 이 토픽의 첫 정수 필드가 gate_ok_value 이면 복구 행동을 허용한다.
         // 예) /ad_can/gear 의 기어 값이 P(파킹)일 때만.
@@ -334,11 +369,9 @@ public:
 
         if (!raw_log_dir_.empty()) {
             ::mkdir(raw_log_dir_.c_str(), 0700);
-            events_.open(raw_log_dir_ + "/events.csv", std::ios::app);
-            if (!events_)
-                throw std::runtime_error("cannot open " + raw_log_dir_ + "/events.csv");
-            if (events_.tellp() == 0)
-                events_ << "wall,steady,sensor,event,fault,step,code,detail\n";
+            events_path_ = raw_log_dir_ + "/events.csv";
+            if (!open_csv(events_, events_path_, EVENTS_HEADER))
+                throw std::runtime_error("cannot open " + events_path_);
         }
 
         heartbeat_ = std::make_unique<UdpHeartbeat>(hb_host, hb_port);
@@ -390,6 +423,9 @@ public:
             base.ladder.size(),
             heartbeat_->enabled() ? "on" : "off",
             raw_log_dir_.empty() ? "off" : raw_log_dir_.c_str());
+        if (!raw_log_dir_.empty())
+            RCLCPP_INFO(get_logger(), "raw log cap: %.1f MB per file (+1 backup), %s",
+                raw_log_max_bytes_ / 1048576.0, raw_log_max_bytes_ ? "rotating" : "unlimited");
     }
 
 private:
@@ -483,11 +519,9 @@ private:
 
         // 원시 로그
         if (!raw_log_dir_.empty()) {
-            s->raw.open(raw_log_dir_ + "/" + id + ".csv", std::ios::app);
-            if (!s->raw)
+            s->raw_path = raw_log_dir_ + "/" + id + ".csv";
+            if (!open_csv(s->raw, s->raw_path, RAW_HEADER))
                 throw std::runtime_error(id + ": cannot open raw log");
-            if (s->raw.tellp() == 0)
-                s->raw << "steady,ros_now,stamp_ns,bytes\n";
         }
 
         if (!s->lifecycle_node.empty())
@@ -705,12 +739,23 @@ private:
             g.publishers = count_publishers(s.topic);
             g.matched = s.sub->get_publisher_count();
 
-            const Fault fault = s.health.diagnose(t, g);
-            const std::string fault_name = to_string(fault);
-            const bool hard = std::find(act_on_faults_.begin(), act_on_faults_.end(),
-                                        fault_name) != act_on_faults_.end();
-            const bool slow = std::find(act_on_faults_slow_.begin(), act_on_faults_slow_.end(),
-                                        fault_name) != act_on_faults_slow_.end();
+            // 해당되는 고장을 전부 모은다. 재시작 여부는 그중 하나라도 행동 대상이면(OR) 결정된다.
+            // 보고하는 대표 고장(fault)은 행동 대상 중 가장 앞의 것, 없으면 가장 앞의 것.
+            const auto faults = s.health.diagnose_all(t, g);
+            const auto in = [](const std::vector<std::string> &list, Fault f) {
+                return std::find(list.begin(), list.end(), std::string(to_string(f))) != list.end();
+            };
+            bool hard = false, slow = false;
+            Fault fault = faults.empty() ? Fault::NONE : faults.front();
+            for (Fault f : faults) {
+                const bool h = in(act_on_faults_, f);
+                const bool sl = in(act_on_faults_slow_, f);
+                if ((h || sl) && !hard && !slow)
+                    fault = f;            // 첫 행동 대상 고장을 대표로
+                hard = hard || h;
+                slow = slow || sl;
+            }
+            s.faults = join_faults(faults);
 
             // 확실한 끊김은 fault_hold_sec, 애매한 고장은 slow_fault_hold_sec 만큼 참는다
             const double hold = hard ? s.ladder.policy().hold_sec : slow_fault_hold_;
@@ -781,10 +826,15 @@ private:
                 std::to_string(worst) + "\n");
         }
 
-        for (auto &s : sensors_)
-            if (s->raw.is_open()) s->raw.flush();
-        if (events_.is_open())
+        for (auto &s : sensors_) {
+            if (!s->raw.is_open()) continue;
+            s->raw.flush();
+            rotate_csv(s->raw, s->raw_path, RAW_HEADER, raw_log_max_bytes_);
+        }
+        if (events_.is_open()) {
             events_.flush();
+            rotate_csv(events_, events_path_, EVENTS_HEADER, raw_log_max_bytes_);
+        }
     }
 
     // 상태가 바뀔 때만 로그와 이벤트를 남긴다
@@ -845,6 +895,7 @@ private:
                 KeyValue x; x.key = k; x.value = v; st.values.push_back(x);
             };
             kv("fault", to_string(s.fault));
+            kv("faults", s.faults);
             kv("state", s.state);
             kv("rx_hz", std::to_string(s.health.hz(t)));
             kv("age_sec", std::to_string(s.health.age()));
@@ -883,6 +934,8 @@ private:
     // ---------------- 멤버
     bool dry_run_ = true;
     std::string raw_log_dir_;
+    uint64_t raw_log_max_bytes_ = 0;
+    std::string events_path_;
     std::string gate_topic_;
     std::string gate_type_;
     Prefix gate_prefix_ = Prefix::NONE;

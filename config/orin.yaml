@@ -6,6 +6,7 @@
     use_sim_time: false
     dry_run: true
     raw_log_dir: "~/.local/state/sensor_watchdog"
+    raw_log_max_mb: 100.0
 
     # 안전 게이트: 기어가 P(22)일 때만 복구 행동을 허용한다. ipc.yaml 과 같은 토픽.
     # Orin 이 IPC 와 같은 ROS_DOMAIN_ID 라면 /vehicle/status/gear_status 가 보인다.

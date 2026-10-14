@@ -164,6 +164,39 @@ static void test_too_small()
     CHECK(h.diagnose(1.0, g) == Fault::TOO_SMALL);
 }
 
+static void test_too_small_does_not_mask()
+{
+    // 예측: 크기도 작고 stamp 도 멈춘 메시지(빈 클라우드를 같은 stamp 로 반복)는
+    //       두 고장이 모두 나오고, STAMP_NOT_ADVANCING 이 앞, TOO_SMALL 이 뒤.
+    Health h(lidar_cfg());
+    h.reset(0.0);
+    feed(h, 0.0, 3.0, 0.1, 100.0, /*advance=*/false, /*bytes=*/50);
+    GraphView g;
+    const auto all = h.diagnose_all(3.0, g);
+    CHECK(all.size() == 2);
+    CHECK(all.size() == 2 && all[0] == Fault::STAMP_NOT_ADVANCING && all[1] == Fault::TOO_SMALL);
+    CHECK(h.diagnose(3.0, g) == Fault::STAMP_NOT_ADVANCING);
+    CHECK(join_faults(all) == "STAMP_NOT_ADVANCING+TOO_SMALL");
+
+    // 예측: 작은 메시지가 2 Hz 로 오면 LOW_HZ 와 TOO_SMALL 둘 다, LOW_HZ 가 앞
+    Health h2(lidar_cfg());
+    h2.reset(0.0);
+    feed(h2, 0.0, 6.0, 0.5, 100.0, true, 50);
+    const auto all2 = h2.diagnose_all(6.0, g);
+    CHECK(all2.size() == 2 && all2[0] == Fault::LOW_HZ && all2[1] == Fault::TOO_SMALL);
+
+    // 예측: 데이터가 끊기면 다른 검사는 하지 않고 RX_TIMEOUT 하나만
+    const auto all3 = h2.diagnose_all(8.0, g);
+    CHECK(all3.size() == 1 && all3[0] == Fault::RX_TIMEOUT);
+
+    // 예측: 정상이면 빈 목록, join 은 "NONE"
+    Health h4(lidar_cfg());
+    h4.reset(0.0);
+    feed(h4, 0.0, 6.0, 0.1);
+    CHECK(h4.diagnose_all(6.0, g).empty());
+    CHECK(join_faults({}) == "NONE");
+}
+
 static void test_low_hz()
 {
     // 예측: 2 Hz로 오면 hz_window(5초)가 찬 뒤 LOW_HZ. 그 전에는 판정 안 함.
@@ -437,6 +470,7 @@ int main()
     test_stamp_not_advancing();
     test_stamp_backward_and_invalid();
     test_too_small();
+    test_too_small_does_not_mask();
     test_low_hz();
     test_age();
     test_ladder_flow();

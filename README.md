@@ -172,8 +172,8 @@ cp systemd/lidar.service systemd/rtk-gps.service systemd/sensor-watchdog.service
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/USER/sensor_ws/install/setup.bash    # 드라이버 워크스페이스
-# export ROS_DOMAIN_ID=0
+source /home/nvidia/ros2_ws/install/setup.bash    # 드라이버 워크스페이스
+export ROS_DOMAIN_ID=101                           # 실차 도메인. 와치독과 센서 유닛 모두 이 파일을 읽으므로 같은 값이 된다
 # export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ```
 

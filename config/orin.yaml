@@ -47,7 +47,7 @@
     attempts_per_step: 2
     healthy_reset_sec: 600.0
 
-    ladder: ["lifecycle", "service", "power"]
+    ladder: ["lifecycle", "service"]
 
     sensors: ["camera"]
 

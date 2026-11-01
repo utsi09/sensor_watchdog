@@ -88,7 +88,7 @@
     #   lifecycle : 센서별 lifecycle_node 가 설정된 경우만 (rslidar_sdk 는 lifecycle 노드가 아님)
     #   service   : 센서별 unit 이 설정된 경우만
     #   power     : 센서별 power_cmd 가 설정된 경우만
-    ladder: ["lifecycle", "service", "power"]
+    ladder: ["lifecycle", "service"]
 
     # 카메라 토픽 확인 후 "camera" 를 뒤에 추가한다.
     sensors: ["front_m1p", "rear_m1p", "left_bp", "right_bp", "gps"]

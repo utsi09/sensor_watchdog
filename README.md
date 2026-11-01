@@ -671,6 +671,23 @@ colcon 으로는 `colcon test --packages-select sensor_watchdog`.
 
 테스트 항목: CDR 헤더 파싱(LE/BE), 정상 흐름, 수신 타임아웃, 그래프 고장 우선순위, 타임스탬프 정지·역행·무효, 크기 미달, 주기 저하, 타임스탬프 나이, 사다리 전체 흐름(유예→대기→행동→다음 칸→소진→초기화), 사다리 없음, 공통 원인, 게이트 필드 파싱.
 
+### 로스백으로 "diagnostics 만 봐도 잡혔을까" 확인
+
+`scripts/bag_diag_check.py` 는 백 안의 센서 토픽 끊김과 `/diagnostics` 보고를 시간순으로 대조합니다. 와치독이 무거운 센서 토픽을 구독하지 않고 드라이버의 `/diagnostics` 만 봐도 같은 고장을 잡았을지 판정할 때 씁니다. 차량 PC(ROS 2 Humble) 에서 실행합니다.
+
+```bash
+python3 scripts/bag_diag_check.py <백_폴더> \
+    --topic /라이다/토픽 --timeout 1.0 \
+    --topic /카메라/토픽 --timeout 1.0 \
+    --keyword lidar --keyword camera
+```
+
+출력 4단락: (1) 백에 있는 diag 이름과 level 분포, (2) 토픽별 끊김 구간, (3) 끊김마다 diag 가 ERROR 로 바뀌거나 보고가 끊긴 지연(초), (4) 토픽은 정상인데 diag 만 ERROR 였던 오탐 후보. 모든 끊김이 "잡힘" 이고 지연이 `fault_hold_sec` 안이며 (4) 가 비어 있으면 diag 로 충분합니다. 판정 로직은 ROS 없이 `python3 test/test_bag_diag_check.py` 로 테스트합니다.
+
+### 와치독이 토픽 Hz 를 떨어뜨리는지 A/B 측정
+
+`scripts/hz_ab_test.py` 는 라이다 크기 메시지를 정해진 Hz 로 발행하는 발행자, 수신 Hz·빠진 메시지를 세는 소비자, 와치독 대역 구독자를 한 파일에 담았습니다. 와치독 없이(A) / 있이(B) 각각 돌려 소비자 Hz 와 발행자 `publish()` 지연을 비교합니다. `--reliable` 로 RELIABLE QoS 에서 "느린 구독자가 발행자를 막는" 경우도 재현할 수 있습니다. 자세한 순서는 파일 머리말에 있습니다.
+
 ---
 
 ## 검증 범위와 한계

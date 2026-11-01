@@ -677,20 +677,24 @@ colcon 으로는 `colcon test --packages-select sensor_watchdog`.
 
 ```bash
 source install/setup.bash
-python3 src/sensor_watchdog/test/bag_fault_test.py <백_폴더>                  # 8개 시나리오 전부 (약 6분)
+python3 src/sensor_watchdog/test/bag_fault_test.py <백_폴더>                  # 12개 시나리오 전부 (약 10분)
 python3 src/sensor_watchdog/test/bag_fault_test.py <백_폴더> --scenario stop   # 하나만
 ```
 
 | 시나리오 | 넣는 고장 | 통과 조건 |
 |---|---|---|
 | `healthy` | 없음 | 전부 HEALTHY 가 되고 끝까지 유지 (오탐 없음) |
-| `stop` | 토픽 끊김 | `RX_TIMEOUT` 으로 행동, 나머지 센서 HEALTHY 유지 |
+| `stop` | 토픽 끊김 (발행자는 살아 있음) | `RX_TIMEOUT` 으로 행동, 나머지 센서 HEALTHY 유지 |
+| `vanish` | 발행자 자체가 사라짐 | `NO_PUBLISHER` 로 행동 |
+| `node_gone` | 드라이버 노드가 사라짐 (`node_name` 검사) | `NODE_NOT_VISIBLE` 로 행동 |
 | `freeze` | stamp 멈춤 | `STAMP_NOT_ADVANCING` 으로 행동 |
-| `slow` | 3개 중 1개만 통과 | `LOW_RX_HZ` 로 행동 |
+| `slow` | 3개 중 1개만 통과 (≈3.3 Hz) | `LOW_RX_HZ` 로 행동 |
+| `slow_ok` | 3개 중 2개 통과 (≈6.7 Hz, `min_hz` 이상) | 고장 아님. HEALTHY 유지 (오탐 검사) |
 | `zero_stamp` | stamp 0 | `STAMP_INVALID_OR_BACKWARD` 로 행동 |
 | `truncate` | 메시지 2 KB 로 자름 | `TOO_SMALL` 기록만, 행동 없음 |
 | `recover` | 끊김 → 재시작 요청 시 복구 | 재시작 호출 정확히 1회, 그 뒤 HEALTHY 복귀 |
 | `all_lidars` | 같은 유닛 센서 전부 끊김 | 유닛 재시작 1회, 공통 원인으로 막히지 않고 전부 복귀 |
+| `hz_impact` | 같은 구간을 와치독 없이/있이 재생 | 독립 구독자가 잰 센서 수신 Hz 가 2 % 이상 떨어지지 않음. 와치독이 보고한 `rx_hz` 도 실측과 일치 |
 
 행동까지 허용 시간은 설정 파일의 `timeout_sec`·`fault_hold_sec`·`slow_fault_hold_sec`·`hz_window_sec` 에서 계산합니다. 실패하면 타임라인과 로그 폴더를 남기고 종료 코드 1 을 냅니다.
 

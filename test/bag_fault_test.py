@@ -13,14 +13,19 @@
 
 시나리오 (기본 고장 대상 = sensors 목록의 첫 센서, --at 초 뒤에 주입):
   healthy     고장 없이 재생. 전부 HEALTHY 가 되고 끝까지 유지돼야 한다 (오탐 검사)
-  stop        토픽 끊김            → RX_TIMEOUT 으로 행동. 나머지 센서는 HEALTHY 유지
-  freeze      stamp 가 멈춘 채 발행 → STAMP_NOT_ADVANCING 으로 행동
-  slow        3개 중 1개만 통과    → LOW_RX_HZ 로 행동
-  zero_stamp  stamp 0             → STAMP_INVALID_OR_BACKWARD 로 행동
-  truncate    메시지를 2 KB 로 자름 → TOO_SMALL 은 기록만 (MONITOR_ONLY), 행동 없음
+  stop        토픽 끊김 (발행자는 살아 있음) → RX_TIMEOUT 으로 행동. 나머지 센서는 HEALTHY 유지
+  vanish      발행자 자체가 사라짐           → NO_PUBLISHER 로 행동
+  node_gone   드라이버 노드가 사라짐 (node_name 검사) → NODE_NOT_VISIBLE 로 행동
+  freeze      stamp 가 멈춘 채 발행          → STAMP_NOT_ADVANCING 으로 행동
+  slow        3개 중 1개만 통과 (≈3.3 Hz)   → LOW_RX_HZ 로 행동
+  slow_ok     3개 중 2개 통과 (≈6.7 Hz, min_hz 이상) → 고장 아님. HEALTHY 유지 (오탐 검사)
+  zero_stamp  stamp 0                       → STAMP_INVALID_OR_BACKWARD 로 행동
+  truncate    메시지를 2 KB 로 자름          → TOO_SMALL 은 기록만 (MONITOR_ONLY), 행동 없음
   recover     끊김 → 가짜 systemctl 이 "restart" 를 받으면 토픽을 다시 흘려 줌
               → 행동 1회 뒤 HEALTHY 로 복귀해야 한다 (복구 경로 끝까지)
   all_lidars  같은 유닛의 센서를 전부 끊음 → 유닛 재시작은 정확히 1회, 전부 복귀
+  hz_impact   같은 구간을 와치독 없이 / 있이 재생하고 독립 구독자가 센서 토픽 수신 Hz 를 잰다
+              → 와치독 때문에 Hz 가 떨어지지 않아야 한다 (기본 허용 2 %)
 
 "행동"은 --mode 에 따라 dry_run 의 DRY_RUN_WOULD_* 상태이거나(기본), 가짜 systemctl 호출이다.
 recover / all_lidars 는 항상 가짜 systemctl 을 쓴다. 진짜 systemctl 은 절대 부르지 않는다.
@@ -38,7 +43,9 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.dirname(HERE)
-ALL_SCENARIOS = ["healthy", "stop", "freeze", "slow", "zero_stamp", "truncate", "recover", "all_lidars"]
+ALL_SCENARIOS = ["healthy", "stop", "vanish", "node_gone", "freeze", "slow", "slow_ok",
+                 "zero_stamp", "truncate", "recover", "all_lidars", "hz_impact"]
+RELAY_NODE = "fault_relay"          # node_gone 시나리오에서 와치독이 감시할 노드 이름
 
 FAKE_SYSTEMCTL = r"""#!/usr/bin/env bash
 # 테스트용 가짜 systemctl. 호출을 기록하고, restart 면 중계기에 "다시 흘려라" 표시를 남긴다.
@@ -67,6 +74,10 @@ def fmt_t(t):
 class Harness:
     """하나의 시나리오를 띄우고, 상태 변화를 모으고, 끝에 판정한다."""
 
+    MODES = {"healthy": None, "stop": "stop", "vanish": "vanish", "node_gone": "node_gone",
+             "freeze": "freeze", "slow": "slow", "slow_ok": "slow_ok", "zero_stamp": "zero_stamp",
+             "truncate": "truncate", "recover": "stop", "all_lidars": "stop", "hz_impact": None}
+
     def __init__(self, args, scenario):
         self.args = args
         self.scenario = scenario
@@ -78,17 +89,18 @@ class Harness:
         unit = self.p[self.fault_sensor].get("unit", "")
         self.unit_siblings = [s for s in self.sensors if unit and self.p[s].get("unit") == unit]
         self.relay_sensors = (self.unit_siblings if scenario == "all_lidars" else [self.fault_sensor])
-        self.mode = {"healthy": None, "stop": "stop", "freeze": "freeze", "slow": "slow",
-                     "zero_stamp": "zero_stamp", "truncate": "truncate",
-                     "recover": "stop", "all_lidars": "stop"}[scenario]
+        self.mode = self.MODES[scenario]
         self.use_fake = scenario in ("recover", "all_lidars") or args.mode == "fake"
         self.tmp = tempfile.mkdtemp(prefix=f"wdbag_{scenario}_")
-        self.events = []            # (rel_t, sensor, state, faults)
+        self.events = []            # (t, sensor, state, faults). 판정 전에 t0 기준 상대시각으로 바꾼다
         self.last_state = {}
+        self.last_kv = {}           # sensor -> 마지막 진단 값 (rx_hz 등)
         self.t0 = None              # 첫 센서 메시지 수신 시각 (monotonic). 타임라인의 0초
         self.t_start = None         # 재생 시작 시각 (t0 를 못 잡았을 때 대신 씀)
         self.frozen = {}
         self.count = {}
+        self.pubs = {}
+        self.vanished = set()
         self.lock = threading.Lock()
         self.fail = []
         self.notes = []
@@ -104,6 +116,8 @@ class Harness:
                "--params-file", self.args.config,
                "-p", f"raw_log_dir:={self.tmp}", "-p", 'heartbeat_host:=""',
                "-p", 'gate_topic:=""']        # 게이트는 백 재생에선 항상 허용 (빈 문자열은 "" 로 줘야 파싱됨)
+        if self.mode == "node_gone":
+            cmd += ["-p", f"{self.fault_sensor}.node_name:=/{RELAY_NODE}"]
         if self.use_fake:
             fake = os.path.join(self.tmp, "fake_systemctl.sh")
             with open(fake, "w") as f:
@@ -114,12 +128,12 @@ class Harness:
             cmd += ["-p", "dry_run:=true"]
         return cmd
 
-    def play_cmd(self):
+    def play_cmd(self, remap=True):
         topics = [self.p[s]["topic"] for s in self.sensors]
         cmd = ["ros2", "bag", "play", self.args.bag, "--disable-keyboard-controls",
                "--topics", *topics]
         remaps = [f"{self.p[s]['topic']}:=/bagsrc{self.p[s]['topic']}" for s in self.relay_sensors]
-        if remaps and self.mode:
+        if remaps and self.mode and remap:
             cmd += ["--remap", *remaps]
         return cmd
 
@@ -134,23 +148,35 @@ class Harness:
             return False
         return True
 
-    def on_sensor_msg(self, sensor, buf, pub):
+    def on_sensor_msg(self, sensor, buf):
         if self.t0 is None:
             self.t0 = time.monotonic()
         self.count[sensor] = self.count.get(sensor, 0) + 1
         b = bytes(buf)
+        pub = self.pubs.get(sensor)
+        if pub is None:
+            return
         if not self.faulting(sensor):
             self.frozen.pop(sensor, None)
             pub.publish(b)
             return
         m = self.mode
-        if m == "stop":
+        if m == "stop" or m == "node_gone":
+            return                      # node_gone 은 주 루프가 노드를 통째로 없앤다
+        if m == "vanish":
+            if sensor not in self.vanished:
+                self.vanished.add(sensor)
+                self.pubs.pop(sensor)
+                self.relay.destroy_publisher(pub)   # 발행자가 그래프에서 사라진다
             return
         if m == "freeze":
             self.frozen.setdefault(sensor, b[4:12])
             pub.publish(b[:4] + self.frozen[sensor] + b[12:])
         elif m == "slow":
             if self.count[sensor] % 3 == 0:
+                pub.publish(b)
+        elif m == "slow_ok":
+            if self.count[sensor] % 3 != 0:
                 pub.publish(b)
         elif m == "zero_stamp":
             pub.publish(b[:4] + struct.pack("<iI", 0, 0) + b[12:])
@@ -170,12 +196,15 @@ class Harness:
             kv = {x.key: x.value for x in st.values}
             state, faults = kv.get("state", "?"), kv.get("faults", "")
             with self.lock:
+                self.last_kv[sensor] = kv
                 if self.last_state.get(sensor) != (state, faults):
                     self.last_state[sensor] = (state, faults)
-                    self.events.append((now, sensor, state, faults))   # 절대 시각. 판정 때 t0 기준으로 바꾼다
+                    self.events.append((now, sensor, state, faults))
 
     # ---- 실행
     def run(self):
+        if self.scenario == "hz_impact":
+            return self.run_hz_impact()
         import rclpy
         from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
         from rclpy.executors import MultiThreadedExecutor
@@ -188,6 +217,7 @@ class Harness:
             env["ROS_DOMAIN_ID"] = str(self.args.domain)
         rclpy.init(domain_id=self.args.domain)
         node = rclpy.create_node("bag_fault_test")
+        self.relay = rclpy.create_node(RELAY_NODE)
         sub_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
                              durability=DurabilityPolicy.VOLATILE)
         pub_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
@@ -195,13 +225,14 @@ class Harness:
         if self.mode:
             for s in self.relay_sensors:
                 T = get_message(self.p[s]["type"])
-                pub = node.create_publisher(T, self.p[s]["topic"], pub_qos)
-                node.create_subscription(T, "/bagsrc" + self.p[s]["topic"],
-                                         lambda b, s=s, pub=pub: self.on_sensor_msg(s, b, pub),
-                                         sub_qos, raw=True)
+                self.pubs[s] = self.relay.create_publisher(T, self.p[s]["topic"], pub_qos)
+                self.relay.create_subscription(T, "/bagsrc" + self.p[s]["topic"],
+                                               lambda b, s=s: self.on_sensor_msg(s, b),
+                                               sub_qos, raw=True)
         node.create_subscription(DiagnosticArray, "/diagnostics", self.on_diag, 10)
         ex = MultiThreadedExecutor(num_threads=4)
         ex.add_node(node)
+        ex.add_node(self.relay)
         spinner = threading.Thread(target=ex.spin, daemon=True)
         spinner.start()
 
@@ -214,13 +245,19 @@ class Harness:
         print(f"[{self.scenario}] 와치독 pid={wd.pid}, 재생 pid={play.pid}, 로그 {self.tmp}")
         if self.mode is None:
             self.t0 = time.monotonic()         # 중계기가 없으니 재생 시작을 기준으로
+        relay_alive = True
         deadline = time.monotonic() + self.args.duration + 5.0
         try:
             while time.monotonic() < deadline:
                 if play.poll() is not None or wd.poll() is not None:
                     break
-                if self.t0 and time.monotonic() - self.t0 >= self.args.duration:
+                el = time.monotonic() - self.t0 if self.t0 else -1.0
+                if el >= self.args.duration:
                     break
+                if self.mode == "node_gone" and relay_alive and el >= self.args.at:
+                    ex.remove_node(self.relay)      # 드라이버 노드가 죽은 것처럼 그래프에서 사라진다
+                    self.relay.destroy_node()
+                    relay_alive = False
                 time.sleep(0.2)
         finally:
             for pr in (play, wd):
@@ -233,6 +270,8 @@ class Harness:
                     pr.kill()
             ex.shutdown(timeout_sec=1.0)
             node.destroy_node()
+            if relay_alive:
+                self.relay.destroy_node()
             rclpy.shutdown()
             wd_log.close(); play_log.close()
         if wd.returncode not in (0, -2, None) and wd.returncode != 130:
@@ -243,6 +282,96 @@ class Harness:
         with self.lock:
             self.events = [(t - self.t0, s, st, f) for t, s, st, f in self.events]
         return self.judge()
+
+    # ---- Hz 영향 측정: 같은 구간을 와치독 없이(A) / 있이(B) 재생하고 독립 구독자가 Hz 를 잰다
+    def run_hz_impact(self):
+        import rclpy
+        from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+        from rclpy.executors import MultiThreadedExecutor
+        from rosidl_runtime_py.utilities import get_message
+        from diagnostic_msgs.msg import DiagnosticArray
+
+        env = dict(os.environ)
+        if self.args.domain is not None:
+            env["ROS_DOMAIN_ID"] = str(self.args.domain)
+        rclpy.init(domain_id=self.args.domain)
+        node = rclpy.create_node("hz_probe")
+        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
+                         durability=DurabilityPolicy.VOLATILE)
+        arrivals = {s: [] for s in self.sensors}
+        for s in self.sensors:
+            T = get_message(self.p[s]["type"])
+            node.create_subscription(T, self.p[s]["topic"],
+                                     lambda b, s=s: arrivals[s].append(time.monotonic()), qos, raw=True)
+        node.create_subscription(DiagnosticArray, "/diagnostics", self.on_diag, 10)
+        ex = MultiThreadedExecutor(num_threads=4)
+        ex.add_node(node)
+        threading.Thread(target=ex.spin, daemon=True).start()
+
+        def measure(with_watchdog):
+            for s in self.sensors:
+                arrivals[s].clear()
+            wd = None
+            if with_watchdog:
+                wd_log = open(os.path.join(self.tmp, "watchdog.log"), "w")
+                wd = subprocess.Popen(self.node_cmd(), env=env, stdout=wd_log, stderr=subprocess.STDOUT)
+                time.sleep(2.0)
+            play_log = open(os.path.join(self.tmp, f"play_{'B' if with_watchdog else 'A'}.log"), "w")
+            play = subprocess.Popen(self.play_cmd(remap=False), env=env, stdout=play_log,
+                                    stderr=subprocess.STDOUT)
+            t_end = time.monotonic() + self.args.duration
+            while time.monotonic() < t_end and play.poll() is None:
+                time.sleep(0.2)
+            for pr in (play, wd):
+                if pr is not None and pr.poll() is None:
+                    pr.send_signal(signal.SIGINT)
+            for pr in (play, wd):
+                if pr is not None:
+                    try:
+                        pr.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pr.kill()
+            play_log.close()
+            out = {}
+            for s in self.sensors:
+                a = arrivals[s]
+                # 처음 2초(재생 램프업)와 마지막 0.5초는 버리고 잰다
+                if len(a) < 10:
+                    out[s] = (0.0, len(a), 0.0)
+                    continue
+                lo, hi = a[0] + 2.0, a[-1] - 0.5
+                w = [t for t in a if lo <= t <= hi]
+                gaps = [y - x for x, y in zip(w, w[1:])]
+                out[s] = ((len(w) - 1) / max(w[-1] - w[0], 1e-9), len(w), max(gaps) if gaps else 0.0)
+            return out
+
+        print(f"[hz_impact] A: 와치독 없이 {self.args.duration:.0f}s 재생")
+        A = measure(False)
+        time.sleep(1.0)
+        print(f"[hz_impact] B: 와치독 켜고 {self.args.duration:.0f}s 재생  (로그 {self.tmp})")
+        B = measure(True)
+        wd_hz = {s: self.last_kv.get(s, {}).get("rx_hz", "?") for s in self.sensors}
+        ex.shutdown(timeout_sec=1.0)
+        node.destroy_node()
+        rclpy.shutdown()
+
+        tol = self.args.hz_tolerance
+        print(f"\n--- [hz_impact] 독립 구독자가 잰 수신 Hz (A 없이 / B 있이, 허용 저하 {tol * 100:.0f} %) ---")
+        print(f"  {'센서':<10} {'A Hz':>7} {'B Hz':>7} {'비율':>6} {'최대간격A':>9} {'최대간격B':>9}  와치독 자체 측정")
+        for s in self.sensors:
+            a_hz, a_n, a_gap = A[s]
+            b_hz, b_n, b_gap = B[s]
+            ratio = b_hz / a_hz if a_hz > 0 else 0.0
+            print(f"  {s:<10} {a_hz:7.2f} {b_hz:7.2f} {ratio:6.3f} {a_gap * 1e3:8.0f}ms {b_gap * 1e3:8.0f}ms  rx_hz={wd_hz[s]}")
+            self.expect(a_n >= 10 and b_n >= 10, f"{s}: 수신 메시지가 너무 적음 (A {a_n}, B {b_n})")
+            self.expect(ratio >= 1.0 - tol, f"{s}: 와치독을 켜니 수신 Hz 가 {a_hz:.2f} → {b_hz:.2f} 로 떨어짐")
+            try:
+                rep = float(wd_hz[s])
+                self.expect(abs(rep - b_hz) <= max(0.1 * b_hz, 0.5),
+                            f"{s}: 와치독이 보고한 rx_hz {rep:.2f} 가 실제 {b_hz:.2f} 와 다름")
+            except ValueError:
+                self.fail.append(f"{s}: 와치독 rx_hz 를 /diagnostics 에서 못 읽음 ({wd_hz[s]})")
+        return self.report(timeline=False)
 
     # ---- 판정
     def first(self, sensor, pred, after=-1e9):
@@ -279,13 +408,23 @@ class Harness:
             self.expect(not bad, f"{s}: 고장 주입 전에 비정상 상태 {bad[:2]}")
 
         sc = self.scenario
-        if sc == "healthy":
+        if sc in ("healthy", "slow_ok"):
+            why = "고장이 없는데" if sc == "healthy" else "min_hz 이상(≈6.7 Hz)인데"
             for s in self.sensors:
                 bad = [e for e in self.states_after(s, grace + 8.0) if is_bad(e[1], e[2])]
-                self.expect(not bad, f"{s}: 고장이 없는데 비정상 상태 (오탐) {bad[:3]}")
-        elif sc in ("stop", "freeze", "slow", "zero_stamp"):
+                self.expect(not bad, f"{s}: {why} 비정상 상태 (오탐) {bad[:3]}")
+            if sc == "slow_ok":
+                try:
+                    hz = float(self.last_kv.get(fs, {}).get("rx_hz", "nan"))
+                    self.notes.append(f"{fs}: 주입 뒤 와치독이 잰 rx_hz {hz:.1f} (min_hz {float(p[fs].get('min_hz', 0)):.1f})")
+                    self.expect(hz < 8.5, f"{fs}: 주기 저하가 실제로 적용되지 않음 (rx_hz {hz:.1f})")
+                except ValueError:
+                    pass
+        elif sc in ("stop", "vanish", "node_gone", "freeze", "slow", "zero_stamp"):
             fault, budget = {
                 "stop":       ("RX_TIMEOUT", float(p[fs].get("timeout_sec", 1.0)) + hold + 2.0),
+                "vanish":     ("NO_PUBLISHER", hold + 4.0),
+                "node_gone":  ("NODE_NOT_VISIBLE", hold + 4.0),
                 "freeze":     ("STAMP_NOT_ADVANCING", float(p[fs].get("stamp_timeout_sec", 1.0)) + slow_hold + 2.0),
                 "slow":       ("LOW_RX_HZ", float(p[fs].get("hz_window_sec", 5.0)) + slow_hold + 3.0),
                 "zero_stamp": ("STAMP_INVALID_OR_BACKWARD", slow_hold + 2.0),
@@ -337,13 +476,14 @@ class Harness:
         with open(path) as f:
             return [" ".join(line.split()[1:]) for line in f if line.strip()]
 
-    def report(self):
-        print(f"\n--- [{self.scenario}] 타임라인 (0 = 첫 센서 메시지, 고장 주입 {self.args.at:.0f}s) ---")
-        for t, s, state, faults in self.events:
-            print(f"  {fmt_t(t)}  {s:<10} {state}{'  ' + faults if faults and faults != 'NONE' else ''}")
-        calls = self.systemctl_calls()
-        if calls:
-            print("  systemctl 호출:", calls)
+    def report(self, timeline=True):
+        if timeline:
+            print(f"\n--- [{self.scenario}] 타임라인 (0 = 첫 센서 메시지, 고장 주입 {self.args.at:.0f}s) ---")
+            for t, s, state, faults in self.events:
+                print(f"  {fmt_t(t)}  {s:<10} {state}{'  ' + faults if faults and faults != 'NONE' else ''}")
+            calls = self.systemctl_calls()
+            if calls:
+                print("  systemctl 호출:", calls)
         for n in self.notes:
             print("  *", n)
         ok = not self.fail
@@ -363,12 +503,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("bag", help="ros2 bag 폴더")
     ap.add_argument("--config", default=os.path.join(PKG, "config", "ipc.yaml"))
-    ap.add_argument("--scenario", default="all", help="all 또는 " + ",".join(ALL_SCENARIOS))
+    ap.add_argument("--scenario", default="all", help="all 또는 쉼표로 이어 쓴 이름: " + ",".join(ALL_SCENARIOS))
     ap.add_argument("--fault-sensor", default=None, help="고장을 넣을 센서 id (기본: sensors 첫 항목)")
     ap.add_argument("--at", type=float, default=15.0, help="첫 메시지 기준 고장 주입 시각 [s]")
     ap.add_argument("--duration", type=float, default=45.0, help="시나리오당 재생 시간 [s]")
     ap.add_argument("--mode", choices=["dry", "fake"], default="dry",
                     help="dry: dry_run 상태만 확인 / fake: 가짜 systemctl 로 행동까지")
+    ap.add_argument("--hz-tolerance", type=float, default=0.02, help="hz_impact 허용 저하 비율 (기본 2 %%)")
     ap.add_argument("--domain", type=int, default=86, help="ROS_DOMAIN_ID (다른 노드와 분리)")
     ap.add_argument("--node-bin", default=None, help="watchdog_node 경로 (기본: ros2 pkg prefix 로 찾음)")
     ap.add_argument("--keep", action="store_true", help="PASS 해도 로그 폴더를 남긴다")
@@ -384,7 +525,7 @@ def main():
     bad = [s for s in scenarios if s not in ALL_SCENARIOS]
     if bad:
         sys.exit(f"모르는 시나리오: {bad}")
-    if args.scenario != "all" and len(scenarios) == 1:
+    if len(scenarios) == 1:
         ok = Harness(args, scenarios[0]).run()
         sys.exit(0 if ok else 1)
 
@@ -393,7 +534,8 @@ def main():
     for sc in scenarios:
         cmd = [sys.executable, os.path.abspath(__file__), args.bag, "--scenario", sc,
                "--config", args.config, "--at", str(args.at), "--duration", str(args.duration),
-               "--mode", args.mode, "--domain", str(args.domain)]
+               "--mode", args.mode, "--domain", str(args.domain),
+               "--hz-tolerance", str(args.hz_tolerance)]
         if args.fault_sensor:
             cmd += ["--fault-sensor", args.fault_sensor]
         if args.node_bin:

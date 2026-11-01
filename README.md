@@ -1,5 +1,30 @@
 # sensor_watchdog
 
+## 바로 쓰기
+
+```bash
+# 1) 빌드 (처음 한 번)
+cd ~/watchdog_ws && colcon build --packages-select sensor_watchdog && source install/setup.bash
+
+# 2) 켜기 / 끄기
+src/sensor_watchdog/scripts/watchdog_on.sh            # 켜기 (감지 전용. 설정 파일의 dry_run 값을 따름)
+src/sensor_watchdog/scripts/watchdog_on.sh --live     # 켜기 + 실제 재시작까지 (dry_run=false)
+src/sensor_watchdog/scripts/watchdog_on.sh my.yaml    # 다른 설정 파일로 켜기 (기본: ~/.config/sensor_watchdog/watchdog.yaml, 없으면 config/ipc.yaml)
+src/sensor_watchdog/scripts/watchdog_off.sh           # 끄기
+
+# 3) 보기
+ros2 topic echo /diagnostics                           # 센서마다 state / faults / publishers
+tail -f ~/.local/state/sensor_watchdog/watchdog.log    # 직접 띄웠을 때 로그
+tail -f ~/.local/state/sensor_watchdog/events.csv      # 상태 변화·재시작 기록
+
+# 4) 테스트
+python3 src/sensor_watchdog/test/bag_fault_test.py <로스백_폴더>   # 실차 백으로 13개 시나리오
+```
+
+`watchdog_on.sh` 는 systemd 유닛(`sensor-watchdog.service`)이 설치돼 있으면 `systemctl --user start sensor-watchdog` 를, 없으면 바이너리를 직접 백그라운드로 띄웁니다. `watchdog_off.sh` 는 둘 다 끕니다. 센서 드라이버는 건드리지 않습니다. systemd 로 등록하는 절차는 [설치](#설치) 참고.
+
+---
+
 ROS 2 Humble 용 센서 감시·자동 복구 노드입니다. 라이다, GPS, 카메라 드라이버가 죽거나 사라지면 알아채고, 정해진 조건에서만 센서 프로세스를 껐다 켜며, 센서 상태를 `/diagnostics` 로 계속 알립니다.
 
 **센서 토픽은 구독하지 않습니다.** 실차에서 구독자가 하나 더 붙으면 라이다 발행 주기가 떨어지는 현상이 있어서, 감시 근거를 DDS 그래프(발행자·노드 유무)와 드라이버가 내는 `/diagnostics` 로만 제한합니다. 와치독이 구독하는 토픽은 `/diagnostics` 하나뿐입니다.

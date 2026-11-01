@@ -4,3 +4,4 @@ log/
 *.exe
 *.o
 .vscode/
+__pycache__/

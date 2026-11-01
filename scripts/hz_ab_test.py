@@ -76,6 +76,7 @@ def run_pub(args):
     seq = 0
     t_end = time.monotonic() + args.duration
     next_t = time.monotonic()
+    first_pub = last_pub = None
     print(f"[pub] {args.topic} {args.hz} Hz {args.bytes} bytes "
           f"{'RELIABLE' if args.reliable else 'BEST_EFFORT'} depth={args.depth} {args.duration}s")
     while time.monotonic() < t_end:
@@ -84,13 +85,17 @@ def run_pub(args):
         t0 = time.perf_counter()
         pub.publish(msg)
         lat.append((time.perf_counter() - t0) * 1e3)
+        last_pub = time.monotonic()
+        first_pub = first_pub if first_pub is not None else last_pub
         seq += 1
         next_t += period
         sleep = next_t - time.monotonic()
         if sleep > 0:
             time.sleep(sleep)
         rclpy.spin_once(node, timeout_sec=0)
-    print(f"[pub] sent={seq} publish() ms: p50={pct(lat, .5):.3f} "
+    actual_hz = (seq - 1) / max((last_pub or 0) - (first_pub or 0), 1e-9)   # 소비자와 같은 방식(첫~마지막 간격)
+    print(f"[pub] sent={seq} 실제 {actual_hz:.2f} Hz (목표 {args.hz}; 소비자 Hz 는 이 값과 비교) "
+          f"publish() ms: p50={pct(lat, .5):.3f} "
           f"p99={pct(lat, .99):.3f} max={max(lat):.3f}  "
           f"(> {period * 1e3 / 2:.0f} ms 면 발행 주기를 잡아먹는 수준)")
     node.destroy_node()

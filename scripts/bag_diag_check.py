@@ -21,6 +21,7 @@
     붙이기 전까지 diag 모드는 쓸 수 없다 (그 센서는 topic 모드 유지).
 """
 import argparse
+import os
 import struct
 import sys
 from collections import defaultdict
@@ -48,8 +49,25 @@ def cdr_header_stamp(buf):
     return sec + nsec * 1e-9
 
 
+def storage_hint(path):
+    """metadata.yaml 의 storage_identifier (mcap/sqlite3). 없으면 None."""
+    meta = os.path.join(path, "metadata.yaml")
+    try:
+        with open(meta, encoding="utf-8") as f:
+            for line in f:
+                if "storage_identifier:" in line:
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
 def open_bag(path, SequentialReader, StorageOptions, ConverterOptions):
-    for storage in ("sqlite3", "mcap"):
+    # metadata 가 말해 주는 저장 형식을 먼저 연다. 엉뚱한 플러그인부터 시도하면
+    # rosbag2 가 "file is not a database" 같은 ERROR 를 찍어서 헷갈린다.
+    hint = storage_hint(path)
+    order = [hint] + [s for s in ("sqlite3", "mcap") if s != hint] if hint else ["sqlite3", "mcap"]
+    for storage in order:
         reader = SequentialReader()
         try:
             reader.open(StorageOptions(uri=path, storage_id=storage),

@@ -671,6 +671,29 @@ colcon 으로는 `colcon test --packages-select sensor_watchdog`.
 
 테스트 항목: CDR 헤더 파싱(LE/BE), 정상 흐름, 수신 타임아웃, 그래프 고장 우선순위, 타임스탬프 정지·역행·무효, 크기 미달, 주기 저하, 타임스탬프 나이, 사다리 전체 흐름(유예→대기→행동→다음 칸→소진→초기화), 사다리 없음, 공통 원인, 게이트 필드 파싱.
 
+### 로스백으로 고장 시나리오 자동 테스트
+
+`test/bag_fault_test.py` 는 실차 백을 재생하면서 센서 토픽 하나를 중간에서 가로채 고장을 흉내 내고, 진짜 `watchdog_node` 가 `/diagnostics` 로 내보내는 상태를 받아 "기대한 시각 안에 기대한 상태가 됐는가, 다른 센서는 멀쩡한가"를 판정합니다. 진짜 `systemctl` 은 부르지 않고, 복구 시나리오는 가짜 systemctl 이 토픽을 다시 흘려 주는 방식으로 끝까지 확인합니다.
+
+```bash
+source install/setup.bash
+python3 src/sensor_watchdog/test/bag_fault_test.py <백_폴더>                  # 8개 시나리오 전부 (약 6분)
+python3 src/sensor_watchdog/test/bag_fault_test.py <백_폴더> --scenario stop   # 하나만
+```
+
+| 시나리오 | 넣는 고장 | 통과 조건 |
+|---|---|---|
+| `healthy` | 없음 | 전부 HEALTHY 가 되고 끝까지 유지 (오탐 없음) |
+| `stop` | 토픽 끊김 | `RX_TIMEOUT` 으로 행동, 나머지 센서 HEALTHY 유지 |
+| `freeze` | stamp 멈춤 | `STAMP_NOT_ADVANCING` 으로 행동 |
+| `slow` | 3개 중 1개만 통과 | `LOW_RX_HZ` 로 행동 |
+| `zero_stamp` | stamp 0 | `STAMP_INVALID_OR_BACKWARD` 로 행동 |
+| `truncate` | 메시지 2 KB 로 자름 | `TOO_SMALL` 기록만, 행동 없음 |
+| `recover` | 끊김 → 재시작 요청 시 복구 | 재시작 호출 정확히 1회, 그 뒤 HEALTHY 복귀 |
+| `all_lidars` | 같은 유닛 센서 전부 끊김 | 유닛 재시작 1회, 공통 원인으로 막히지 않고 전부 복귀 |
+
+행동까지 허용 시간은 설정 파일의 `timeout_sec`·`fault_hold_sec`·`slow_fault_hold_sec`·`hz_window_sec` 에서 계산합니다. 실패하면 타임라인과 로그 폴더를 남기고 종료 코드 1 을 냅니다.
+
 ### 로스백으로 "diagnostics 만 봐도 잡혔을까" 확인
 
 `scripts/bag_diag_check.py` 는 백 안의 센서 토픽 끊김과 `/diagnostics` 보고를 시간순으로 대조합니다. 와치독이 무거운 센서 토픽을 구독하지 않고 드라이버의 `/diagnostics` 만 봐도 같은 고장을 잡았을지 판정할 때 씁니다. 차량 PC(ROS 2 Humble) 에서 실행합니다.

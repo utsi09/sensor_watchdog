@@ -1,15 +1,18 @@
 #pragma once
 // ROS에 의존하지 않는 순수 판정 로직.
-// 1) Health        : 관측(수신 시각, stamp, 크기) → 고장 코드
+// 1) Health        : 관측(그래프에 노드·발행자가 있는가, 드라이버 /diagnostics 가 정상인가) → 고장 코드
 // 2) Ladder        : 고장 코드 + 시간 → 지금 뭘 할 차례인지(유예/대기/행동/포기)
 // 3) common_cause  : 여러 센서가 동시에 죽었는지
+//
+// 센서 토픽은 구독하지 않는다. 실차에서 구독자가 하나 더 붙으면 라이다 발행 주기가 떨어지는
+// 현상이 있어, 감시 근거는 DDS 그래프(디스커버리 정보)와 드라이버가 내는 /diagnostics 로 제한한다.
+// 그래서 "발행자는 살아 있는데 데이터만 멈춤"은 드라이버가 diag 를 내지 않으면 잡을 수 없다.
 //
 // 이 파일은 test/test_health.cpp 로 ROS 없이 단독 테스트된다.
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <string>
 #include <utility>
 #include <vector>
@@ -23,15 +26,11 @@ struct SensorConfig
 {
     std::string id;
 
-    double timeout_sec = 1.0;         // 마지막 수신 후 허용 시간
-    double stamp_timeout_sec = 1.0;   // stamp가 전진하지 않는 상태 허용 시간
-    double min_hz = 0.0;              // 0이면 Hz 검사 안 함
-    double hz_window_sec = 5.0;
-    int64_t min_bytes = 1;            // 직렬화 크기 하한 (원시 로그 보고 정한다)
+    std::size_t max_publishers = 1;   // 이보다 많으면 DUPLICATE (드라이버가 두 번 떠 있음)
 
-    bool check_stamp_progress = true;
-    bool check_stamp_age = false;     // PTP로 시각 맞춘 뒤에 켠다
-    double max_age_sec = 0.5;
+    bool diag_checked = false;        // diag_names 가 설정돼 있는가 (없으면 그래프만 본다)
+    double diag_timeout_sec = 3.0;    // 마지막 diag 보고 후 허용 시간. 넘으면 DIAG_STALE
+    int diag_error_level = 2;         // 이 level 이상이면 DIAG_ERROR (0 OK, 1 WARN, 2 ERROR, 3 STALE)
 };
 
 // ---------------------------------------------------------------- 고장 코드
@@ -39,33 +38,27 @@ struct SensorConfig
 enum class Fault
 {
     NONE,
-    NODE_NOT_VISIBLE,
-    NO_PUBLISHER,
-    NO_MATCHED_PUBLISHER,
-    RX_TIMEOUT,
-    TOO_SMALL,
-    STAMP_INVALID,
-    STAMP_AGE,
-    STAMP_NOT_ADVANCING,
-    LOW_HZ
+    NODE_NOT_VISIBLE,   // node_name 이 그래프에 없다 (드라이버 프로세스가 죽음)
+    NO_PUBLISHER,       // 토픽에 발행자가 없다 (드라이버가 죽었거나 아직 안 떴음)
+    DIAG_STALE,         // 드라이버 diag 보고가 끊겼다 (프로세스는 있는데 멈춤)
+    DIAG_ERROR,         // 드라이버 diag 가 ERROR 다 (드라이버 스스로 고장을 보고)
+    DUPLICATE           // 같은 토픽 발행자 또는 같은 이름 노드가 둘 이상 (드라이버가 중복으로 떠 있음)
 };
 
 inline const char *to_string(Fault f)
 {
     switch (f) {
-    case Fault::NONE:                 return "NONE";
-    case Fault::NODE_NOT_VISIBLE:     return "NODE_NOT_VISIBLE";
-    case Fault::NO_PUBLISHER:         return "NO_PUBLISHER";
-    case Fault::NO_MATCHED_PUBLISHER: return "NO_MATCHED_PUBLISHER_CHECK_QOS_TYPE";
-    case Fault::RX_TIMEOUT:           return "RX_TIMEOUT";
-    case Fault::TOO_SMALL:            return "TOO_SMALL";
-    case Fault::STAMP_INVALID:        return "STAMP_INVALID_OR_BACKWARD";
-    case Fault::STAMP_AGE:            return "STAMP_AGE_OR_CLOCK";
-    case Fault::STAMP_NOT_ADVANCING:  return "STAMP_NOT_ADVANCING";
-    case Fault::LOW_HZ:               return "LOW_RX_HZ";
+    case Fault::NONE:             return "NONE";
+    case Fault::NODE_NOT_VISIBLE: return "NODE_NOT_VISIBLE";
+    case Fault::NO_PUBLISHER:     return "NO_PUBLISHER";
+    case Fault::DIAG_STALE:       return "DIAG_STALE";
+    case Fault::DIAG_ERROR:       return "DIAG_ERROR";
+    case Fault::DUPLICATE:        return "DUPLICATE";
     }
     return "?";
 }
+
+constexpr Fault LAST_FAULT = Fault::DUPLICATE;
 
 // "A+B+C" 형태로 합친다. 비어 있으면 "NONE".
 inline std::string join_faults(const std::vector<Fault> &faults)
@@ -78,13 +71,19 @@ inline std::string join_faults(const std::vector<Fault> &faults)
     return out;
 }
 
-// ROS 그래프에서 본 정보. 노드 쪽에서 채워서 넘긴다.
+inline bool has_fault(const std::vector<Fault> &faults, Fault f)
+{
+    return std::find(faults.begin(), faults.end(), f) != faults.end();
+}
+
+// ROS 그래프에서 본 정보. 노드 쪽에서 채워서 넘긴다. 구독 없이 디스커버리 정보만으로 얻는다.
 struct GraphView
 {
     bool node_checked = false;   // node_name이 설정돼 있는가
-    bool node_visible = true;
+    std::size_t node_count = 1;  // get_node_names() 에 node_name 이 몇 번 나오는가 (0 = 없음, 2+ = 중복)
     std::size_t publishers = 1;  // count_publishers(topic)
-    std::size_t matched = 1;     // subscription->get_publisher_count()
+
+    bool node_visible() const { return !node_checked || node_count > 0; }
 };
 
 // ---------------------------------------------------------------- Health
@@ -96,133 +95,73 @@ public:
 
     const SensorConfig &config() const { return cfg_; }
 
-    // 재시작 직후 등, 관측을 처음부터 다시 쌓을 때
+    // 재시작 직후 등, 관측을 처음부터 다시 쌓을 때.
+    // diag 는 "방금 본 것"으로 취급해 diag_timeout_sec 동안 보고가 없어야 STALE 이 된다.
     void reset(double now)
     {
-        reset_at_ = now;
-        last_rx_ = now;
-        last_advance_ = now;
+        last_diag_ = now;
+        level_ = 0;
+        message_.clear();
         received_ = false;
-        last_stamp_ = 0;
-        stamp_bad_ = false;
-        too_small_ = false;
-        age_ = 0.0;
-        arrivals_.clear();
     }
 
-    // now     : steady clock 초 (수신 간격 측정용)
-    // ros_now : ROS 시각 초 (stamp 나이 계산용, check_stamp_age일 때만 의미)
-    void on_message(double now, double ros_now, int32_t sec, uint32_t nsec, std::size_t bytes)
+    // 이 센서와 관련된 /diagnostics 상태를 받았을 때. level 은 그 묶음 중 가장 나쁜 값.
+    void on_diag(double now, int level, std::string message)
     {
-        const int64_t stamp = int64_t(sec) * 1000000000LL + int64_t(nsec);
-
-        stamp_bad_ =
-            sec < 0 ||
-            nsec >= 1000000000U ||
-            stamp <= 0 ||
-            (received_ && stamp < last_stamp_);
-
-        if (!received_ || stamp > last_stamp_)
-            last_advance_ = now;
-
-        last_stamp_ = stamp;
-        last_rx_ = now;
+        last_diag_ = now;
+        level_ = level;
+        message_ = std::move(message);
         received_ = true;
         ++count_;
-
-        too_small_ = static_cast<int64_t>(bytes) < cfg_.min_bytes;
-        age_ = ros_now - static_cast<double>(stamp) * 1e-9;
-
-        arrivals_.push_back(now);
-        trim(now);
     }
 
-    // 지금 해당되는 고장을 전부, 심한 것부터 순서대로 돌려준다.
-    // - 그래프 고장(노드/발행자 없음)과 수신 끊김은 데이터가 없는 상태라 그것 하나만 돌려준다.
-    //   (데이터가 없으면 stamp·주기·크기 검사는 의미가 없다)
-    // - 데이터가 오고 있으면 stamp 이상, 주기 저하, 크기 미달을 모두 모은다. 하나만 고르면
-    //   "기록만 하는 고장"(TOO_SMALL, STAMP_AGE)이 재시작 대상 고장을 가릴 수 있기 때문이다.
-    // - TOO_SMALL 은 가장 뒤. 빈 클라우드는 보통 다른 증상과 같이 오고, 그 증상이 더 중요하다.
-    std::vector<Fault> diagnose_all(double now, const GraphView &g)
+    // 지금 해당되는 고장을 심한 것부터.
+    // - 노드 없음 / 발행자 없음은 데이터 출처가 없는 상태라 그것 하나만 돌려준다.
+    // - 발행자가 있으면 중복(DUPLICATE)과 diag 상태(STALE 또는 ERROR)를 모은다.
+    std::vector<Fault> diagnose_all(double now, const GraphView &g) const
     {
-        trim(now);
-
-        if (g.node_checked && !g.node_visible)
+        if (!g.node_visible())
             return {Fault::NODE_NOT_VISIBLE};
 
         if (g.publishers == 0)
             return {Fault::NO_PUBLISHER};
 
-        if (g.matched == 0)
-            return {Fault::NO_MATCHED_PUBLISHER};
-
-        if (!received_ || now - last_rx_ > cfg_.timeout_sec)
-            return {Fault::RX_TIMEOUT};
-
         std::vector<Fault> out;
 
-        if ((cfg_.check_stamp_progress || cfg_.check_stamp_age) && stamp_bad_)
-            out.push_back(Fault::STAMP_INVALID);
+        if (g.publishers > cfg_.max_publishers || (g.node_checked && g.node_count > 1))
+            out.push_back(Fault::DUPLICATE);
 
-        if (cfg_.check_stamp_age && (age_ > cfg_.max_age_sec || age_ < -0.1))
-            out.push_back(Fault::STAMP_AGE);
-
-        if (cfg_.check_stamp_progress && now - last_advance_ > cfg_.stamp_timeout_sec)
-            out.push_back(Fault::STAMP_NOT_ADVANCING);
-
-        if (cfg_.min_hz > 0.0 &&
-            now - reset_at_ >= cfg_.hz_window_sec &&
-            hz(now) < cfg_.min_hz)
-        {
-            out.push_back(Fault::LOW_HZ);
+        if (cfg_.diag_checked) {
+            if (now - last_diag_ > cfg_.diag_timeout_sec)
+                out.push_back(Fault::DIAG_STALE);
+            else if (level_ >= cfg_.diag_error_level)
+                out.push_back(Fault::DIAG_ERROR);
         }
-
-        if (too_small_)
-            out.push_back(Fault::TOO_SMALL);
 
         return out;
     }
 
     // 가장 심한 고장 하나. 없으면 NONE.
-    Fault diagnose(double now, const GraphView &g)
+    Fault diagnose(double now, const GraphView &g) const
     {
         const auto all = diagnose_all(now, g);
         return all.empty() ? Fault::NONE : all.front();
     }
 
-    double hz(double now)
-    {
-        trim(now);
-        return static_cast<double>(arrivals_.size()) / cfg_.hz_window_sec;
-    }
-
+    double diag_age(double now) const { return now - last_diag_; }
+    int diag_level() const { return level_; }
+    const std::string &diag_message() const { return message_; }
     bool received() const { return received_; }
-    double age() const { return age_; }
     uint64_t count() const { return count_; }
-    int64_t last_stamp() const { return last_stamp_; }
 
 private:
-    void trim(double now)
-    {
-        while (!arrivals_.empty() && now - arrivals_.front() > cfg_.hz_window_sec)
-            arrivals_.pop_front();
-    }
-
     SensorConfig cfg_;
 
-    double reset_at_ = 0.0;
-    double last_rx_ = 0.0;
-    double last_advance_ = 0.0;
-    double age_ = 0.0;
-
+    double last_diag_ = 0.0;
+    int level_ = 0;
+    std::string message_;
     bool received_ = false;
-    bool stamp_bad_ = false;
-    bool too_small_ = false;
-
-    int64_t last_stamp_ = 0;
     uint64_t count_ = 0;
-
-    std::deque<double> arrivals_;
 };
 
 // ---------------------------------------------------------------- Ladder

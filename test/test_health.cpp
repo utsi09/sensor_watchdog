@@ -22,27 +22,21 @@ static int failures = 0;
         }                                                                  \
     } while (0)
 
-// 10 Hz 센서를 흉내 내는 보조 함수. from~to 초 동안 메시지를 넣는다.
-static void feed(Health &h, double from, double to, double period,
-                 double stamp_start = 100.0, bool advance = true, std::size_t bytes = 1000)
-{
-    for (double t = from; t < to; t += period) {
-        const double stamp = advance ? stamp_start + (t - from) : stamp_start;
-        const int32_t sec = static_cast<int32_t>(stamp);
-        const uint32_t nsec = static_cast<uint32_t>((stamp - sec) * 1e9);
-        h.on_message(t, /*ros_now=*/t + 1000.0, sec, nsec, bytes);
-    }
-}
-
-static SensorConfig lidar_cfg()
+static SensorConfig graph_only_cfg()
 {
     SensorConfig c;
     c.id = "lidar";
-    c.timeout_sec = 1.0;
-    c.stamp_timeout_sec = 1.0;
-    c.min_hz = 5.0;
-    c.hz_window_sec = 5.0;
-    c.min_bytes = 100;
+    c.diag_checked = false;
+    return c;
+}
+
+static SensorConfig diag_cfg(int error_level = 2)
+{
+    SensorConfig c;
+    c.id = "gps";
+    c.diag_checked = true;
+    c.diag_timeout_sec = 3.0;
+    c.diag_error_level = error_level;
     return c;
 }
 
@@ -73,154 +67,196 @@ static void test_cdr()
     CHECK(!read_header_stamp(bad, sizeof(bad)).has_value());
 }
 
-static void test_healthy()
+static void test_graph_only_healthy()
 {
-    // 예측: 10 Hz로 6초 받으면 NONE, hz는 약 10
-    Health h(lidar_cfg());
+    // 예측: diag 를 안 보는 센서는 노드·발행자만 있으면 NONE. 보고가 없어도 STALE 이 아니다.
+    Health h(graph_only_cfg());
     h.reset(0.0);
-    feed(h, 0.0, 6.0, 0.1);
-    GraphView g;
-    CHECK(h.diagnose(6.0, g) == Fault::NONE);
-    CHECK(h.hz(6.0) > 9.0 && h.hz(6.0) <= 10.5);
+    GraphView g;              // node 미검사, 발행자 1
+    CHECK(h.diagnose(0.1, g) == Fault::NONE);
+    CHECK(h.diagnose(100.0, g) == Fault::NONE);
+    CHECK(h.diagnose_all(100.0, g).empty());
 }
 
-static void test_rx_timeout()
+static void test_graph_faults()
 {
-    // 예측: 6초까지 받고 7.5초에 보면 RX_TIMEOUT
-    Health h(lidar_cfg());
-    h.reset(0.0);
-    feed(h, 0.0, 6.0, 0.1);
-    GraphView g;
-    CHECK(h.diagnose(7.5, g) == Fault::RX_TIMEOUT);
-
-    // 예측: 아무것도 안 받았으면 RX_TIMEOUT
-    Health h2(lidar_cfg());
-    h2.reset(0.0);
-    CHECK(h2.diagnose(2.0, g) == Fault::RX_TIMEOUT);
-}
-
-static void test_graph_first()
-{
-    // 예측: 그래프 문제는 수신 문제보다 먼저 보고된다
-    Health h(lidar_cfg());
+    // 예측: node_name 을 검사하는데 그래프에 없으면 NODE_NOT_VISIBLE
+    Health h(graph_only_cfg());
     h.reset(0.0);
     GraphView g;
     g.node_checked = true;
-    g.node_visible = false;
+    g.node_count = 0;
+    CHECK(!g.node_visible());
     CHECK(h.diagnose(2.0, g) == Fault::NODE_NOT_VISIBLE);
 
-    g.node_visible = true;
+    // 예측: 노드는 있는데 발행자가 0 이면 NO_PUBLISHER
+    g.node_count = 1;
     g.publishers = 0;
     CHECK(h.diagnose(2.0, g) == Fault::NO_PUBLISHER);
 
+    // 예측: 둘 다 있으면 NONE
     g.publishers = 1;
-    g.matched = 0;
-    CHECK(h.diagnose(2.0, g) == Fault::NO_MATCHED_PUBLISHER);
+    CHECK(h.diagnose(2.0, g) == Fault::NONE);
+
+    // 예측: 노드 미검사(node_name 없음)면 node_count 는 무시, 발행자 0 → NO_PUBLISHER
+    g.node_checked = false;
+    g.node_count = 0;
+    g.publishers = 0;
+    CHECK(g.node_visible());
+    CHECK(h.diagnose(2.0, g) == Fault::NO_PUBLISHER);
 }
 
-static void test_stamp_not_advancing()
+static void test_duplicate()
 {
-    // 예측: 메시지는 10 Hz로 오는데 stamp가 같으면 1초 뒤 STAMP_NOT_ADVANCING
-    Health h(lidar_cfg());
+    // 예측: 발행자가 max_publishers(1) 보다 많으면 DUPLICATE
+    Health h(graph_only_cfg());
     h.reset(0.0);
-    feed(h, 0.0, 6.0, 0.1, 100.0, /*advance=*/false);
     GraphView g;
-    CHECK(h.diagnose(6.0, g) == Fault::STAMP_NOT_ADVANCING);
-}
+    g.publishers = 2;
+    CHECK(h.diagnose(1.0, g) == Fault::DUPLICATE);
 
-static void test_stamp_backward_and_invalid()
-{
-    // 예측: stamp가 뒤로 가면 STAMP_INVALID
-    Health h(lidar_cfg());
-    h.reset(0.0);
-    h.on_message(0.1, 1000.0, 100, 0, 1000);
-    h.on_message(0.2, 1000.0, 99, 0, 1000);
-    GraphView g;
-    CHECK(h.diagnose(0.3, g) == Fault::STAMP_INVALID);
+    // 예측: 같은 이름 노드가 둘이어도 DUPLICATE (발행자 1 이어도)
+    g.publishers = 1;
+    g.node_checked = true;
+    g.node_count = 2;
+    CHECK(h.diagnose(1.0, g) == Fault::DUPLICATE);
 
-    // 예측: 파싱 실패(sec=-1)도 STAMP_INVALID
-    Health h2(lidar_cfg());
+    // 예측: 노드 미검사면 node_count 2 는 의미 없음 → NONE
+    g.node_checked = false;
+    CHECK(h.diagnose(1.0, g) == Fault::NONE);
+
+    // 예측: max_publishers 2 인 센서는 발행자 2 가 정상
+    SensorConfig c = graph_only_cfg();
+    c.max_publishers = 2;
+    Health h2(c);
     h2.reset(0.0);
-    h2.on_message(0.1, 1000.0, -1, 0, 1000);
-    CHECK(h2.diagnose(0.2, g) == Fault::STAMP_INVALID);
+    GraphView g2;
+    g2.publishers = 2;
+    CHECK(h2.diagnose(1.0, g2) == Fault::NONE);
+    g2.publishers = 3;
+    CHECK(h2.diagnose(1.0, g2) == Fault::DUPLICATE);
 
-    // 예측: stamp 검사를 둘 다 끄면 무시된다
-    SensorConfig c = lidar_cfg();
-    c.check_stamp_progress = false;
-    c.check_stamp_age = false;
-    Health h3(c);
-    h3.reset(0.0);
-    h3.on_message(0.1, 1000.0, -1, 0, 1000);
-    CHECK(h3.diagnose(0.2, g) == Fault::NONE);
+    // 예측: 발행자 0 이 중복보다 먼저다 (노드 둘인데 발행자 없음 → NO_PUBLISHER)
+    GraphView g3;
+    g3.node_checked = true;
+    g3.node_count = 2;
+    g3.publishers = 0;
+    CHECK(h.diagnose(1.0, g3) == Fault::NO_PUBLISHER);
 }
 
-static void test_too_small()
+static void test_duplicate_with_diag()
 {
-    // 예측: min_bytes 미만이면 TOO_SMALL
-    Health h(lidar_cfg());
+    // 예측: 중복 + diag ERROR 면 둘 다 보고하고, 중복이 앞에 온다
+    Health h(diag_cfg());
     h.reset(0.0);
-    feed(h, 0.0, 1.0, 0.1, 100.0, true, /*bytes=*/50);
+    h.on_diag(1.0, 2, "error");
     GraphView g;
-    CHECK(h.diagnose(1.0, g) == Fault::TOO_SMALL);
-}
-
-static void test_too_small_does_not_mask()
-{
-    // 예측: 크기도 작고 stamp 도 멈춘 메시지(빈 클라우드를 같은 stamp 로 반복)는
-    //       두 고장이 모두 나오고, STAMP_NOT_ADVANCING 이 앞, TOO_SMALL 이 뒤.
-    Health h(lidar_cfg());
-    h.reset(0.0);
-    feed(h, 0.0, 3.0, 0.1, 100.0, /*advance=*/false, /*bytes=*/50);
-    GraphView g;
-    const auto all = h.diagnose_all(3.0, g);
+    g.publishers = 2;
+    const auto all = h.diagnose_all(1.5, g);
     CHECK(all.size() == 2);
-    CHECK(all.size() == 2 && all[0] == Fault::STAMP_NOT_ADVANCING && all[1] == Fault::TOO_SMALL);
-    CHECK(h.diagnose(3.0, g) == Fault::STAMP_NOT_ADVANCING);
-    CHECK(join_faults(all) == "STAMP_NOT_ADVANCING+TOO_SMALL");
+    CHECK(all[0] == Fault::DUPLICATE && all[1] == Fault::DIAG_ERROR);
+    CHECK(join_faults(all) == "DUPLICATE+DIAG_ERROR");
+    CHECK(has_fault(all, Fault::DUPLICATE));
+    CHECK(!has_fault(all, Fault::DIAG_STALE));
+}
 
-    // 예측: 작은 메시지가 2 Hz 로 오면 LOW_HZ 와 TOO_SMALL 둘 다, LOW_HZ 가 앞
-    Health h2(lidar_cfg());
-    h2.reset(0.0);
-    feed(h2, 0.0, 6.0, 0.5, 100.0, true, 50);
-    const auto all2 = h2.diagnose_all(6.0, g);
-    CHECK(all2.size() == 2 && all2[0] == Fault::LOW_HZ && all2[1] == Fault::TOO_SMALL);
+static void test_graph_before_diag()
+{
+    // 예측: 발행자가 없으면 diag 가 ERROR 여도 NO_PUBLISHER 하나만 보고한다
+    Health h(diag_cfg());
+    h.reset(0.0);
+    h.on_diag(1.0, 2, "driver says error");
+    GraphView g;
+    g.publishers = 0;
+    const auto all = h.diagnose_all(1.5, g);
+    CHECK(all.size() == 1 && all.front() == Fault::NO_PUBLISHER);
+}
 
-    // 예측: 데이터가 끊기면 다른 검사는 하지 않고 RX_TIMEOUT 하나만
-    const auto all3 = h2.diagnose_all(8.0, g);
-    CHECK(all3.size() == 1 && all3[0] == Fault::RX_TIMEOUT);
+static void test_diag_stale()
+{
+    // 예측: reset 직후 3초 안에는 보고가 없어도 NONE, 3초 넘으면 DIAG_STALE
+    Health h(diag_cfg());
+    h.reset(0.0);
+    GraphView g;
+    CHECK(h.diagnose(2.9, g) == Fault::NONE);
+    CHECK(h.diagnose(3.1, g) == Fault::DIAG_STALE);
+    CHECK(!h.received());
 
-    // 예측: 정상이면 빈 목록, join 은 "NONE"
-    Health h4(lidar_cfg());
-    h4.reset(0.0);
-    feed(h4, 0.0, 6.0, 0.1);
-    CHECK(h4.diagnose_all(6.0, g).empty());
+    // 예측: 보고가 들어오면 다시 NONE, 그 뒤 3초 지나면 다시 STALE
+    h.on_diag(4.0, 0, "ok");
+    CHECK(h.received());
+    CHECK(h.diagnose(6.9, g) == Fault::NONE);
+    CHECK(h.diagnose(7.1, g) == Fault::DIAG_STALE);
+    CHECK(h.diag_age(7.1) > 3.0);
+}
+
+static void test_diag_error()
+{
+    // 예측: level 2(ERROR) 보고면 DIAG_ERROR, level 1(WARN) 은 기본 설정에서 NONE
+    Health h(diag_cfg());
+    h.reset(0.0);
+    GraphView g;
+    h.on_diag(1.0, 2, "no events in window");
+    CHECK(h.diagnose(1.5, g) == Fault::DIAG_ERROR);
+    CHECK(h.diag_level() == 2);
+    CHECK(h.diag_message() == "no events in window");
+
+    h.on_diag(2.0, 1, "slow");
+    CHECK(h.diagnose(2.5, g) == Fault::NONE);
+
+    h.on_diag(3.0, 0, "ok");
+    CHECK(h.diagnose(3.5, g) == Fault::NONE);
+
+    // 예측: level 3(STALE, diagnostic_aggregator 가 붙이는 값) 도 ERROR 이상이다
+    h.on_diag(4.0, 3, "stale");
+    CHECK(h.diagnose(4.5, g) == Fault::DIAG_ERROR);
+}
+
+static void test_diag_error_level_warn()
+{
+    // 예측: diag_error_level 1 이면 WARN 부터 DIAG_ERROR
+    Health h(diag_cfg(1));
+    h.reset(0.0);
+    GraphView g;
+    h.on_diag(1.0, 1, "warn");
+    CHECK(h.diagnose(1.5, g) == Fault::DIAG_ERROR);
+    h.on_diag(2.0, 0, "ok");
+    CHECK(h.diagnose(2.5, g) == Fault::NONE);
+}
+
+static void test_diag_stale_over_error()
+{
+    // 예측: 마지막 보고가 ERROR 였어도 보고 자체가 끊기면 STALE 로 보고한다 (더 심한 상태)
+    Health h(diag_cfg());
+    h.reset(0.0);
+    GraphView g;
+    h.on_diag(1.0, 2, "error");
+    CHECK(h.diagnose(2.0, g) == Fault::DIAG_ERROR);
+    CHECK(h.diagnose(4.5, g) == Fault::DIAG_STALE);
+}
+
+static void test_reset_clears_diag()
+{
+    // 예측: 재시작 뒤 reset 하면 이전 ERROR 는 잊고, 보고가 올 때까지 3초 유예
+    Health h(diag_cfg());
+    h.reset(0.0);
+    GraphView g;
+    h.on_diag(1.0, 2, "error");
+    CHECK(h.diagnose(1.5, g) == Fault::DIAG_ERROR);
+    h.reset(10.0);
+    CHECK(h.diagnose(10.5, g) == Fault::NONE);
+    CHECK(h.diag_level() == 0);
+    CHECK(h.diagnose(13.5, g) == Fault::DIAG_STALE);
+}
+
+static void test_join_faults()
+{
     CHECK(join_faults({}) == "NONE");
-}
-
-static void test_low_hz()
-{
-    // 예측: 2 Hz로 오면 hz_window(5초)가 찬 뒤 LOW_HZ. 그 전에는 판정 안 함.
-    Health h(lidar_cfg());
-    h.reset(0.0);
-    feed(h, 0.0, 3.0, 0.5);
-    GraphView g;
-    CHECK(h.diagnose(3.0, g) == Fault::NONE);   // 아직 5초 안 참
-
-    feed(h, 3.0, 6.0, 0.5);
-    CHECK(h.diagnose(6.0, g) == Fault::LOW_HZ);
-}
-
-static void test_age()
-{
-    // 예측: check_stamp_age=true 이고 메시지가 2초 늦으면 STAMP_AGE
-    SensorConfig c = lidar_cfg();
-    c.check_stamp_age = true;
-    c.max_age_sec = 0.5;
-    Health h(c);
-    h.reset(0.0);
-    h.on_message(0.1, /*ros_now=*/102.0, 100, 0, 1000);
-    GraphView g;
-    CHECK(h.diagnose(0.2, g) == Fault::STAMP_AGE);
+    CHECK(join_faults({Fault::NO_PUBLISHER}) == "NO_PUBLISHER");
+    CHECK(join_faults({Fault::DIAG_STALE, Fault::DIAG_ERROR}) == "DIAG_STALE+DIAG_ERROR");
+    // 예측: 모든 고장 이름이 to_string 으로 나오고 LAST_FAULT 까지 빠짐없다
+    for (int i = 0; i <= static_cast<int>(LAST_FAULT); ++i)
+        CHECK(std::string(to_string(static_cast<Fault>(i))) != "?");
 }
 
 static Policy policy_two_steps()
@@ -241,12 +277,12 @@ static void test_ladder_flow()
     l.reset(0.0);
 
     // 예측: 유예 10초 동안은 고장이어도 GRACE
-    CHECK(l.evaluate(5.0, Fault::RX_TIMEOUT) == Verdict::GRACE);
+    CHECK(l.evaluate(5.0, Fault::NO_PUBLISHER) == Verdict::GRACE);
 
     // 예측: 10초 지나 고장 시작 → HOLDING, 1초 뒤 ACT (service 칸)
-    CHECK(l.evaluate(10.0, Fault::RX_TIMEOUT) == Verdict::HOLDING);
-    CHECK(l.evaluate(10.5, Fault::RX_TIMEOUT) == Verdict::HOLDING);
-    CHECK(l.evaluate(11.0, Fault::RX_TIMEOUT) == Verdict::ACT);
+    CHECK(l.evaluate(10.0, Fault::NO_PUBLISHER) == Verdict::HOLDING);
+    CHECK(l.evaluate(10.5, Fault::NO_PUBLISHER) == Verdict::HOLDING);
+    CHECK(l.evaluate(11.0, Fault::NO_PUBLISHER) == Verdict::ACT);
     CHECK(l.current() == Step::SERVICE);
     CHECK(l.bad_since() == 10.0);
 
@@ -257,10 +293,10 @@ static void test_ladder_flow()
     CHECK(l.total_actions() == 1);
 
     // 예측: 완료 후 10초 유예, 그 뒤 고장이면 cooldown(완료+30초)까지 COOLDOWN
-    CHECK(l.evaluate(20.0, Fault::RX_TIMEOUT) == Verdict::GRACE);
-    CHECK(l.evaluate(24.0, Fault::RX_TIMEOUT) == Verdict::HOLDING);
-    CHECK(l.evaluate(26.0, Fault::RX_TIMEOUT) == Verdict::COOLDOWN);
-    CHECK(l.evaluate(44.0, Fault::RX_TIMEOUT) == Verdict::ACT);
+    CHECK(l.evaluate(20.0, Fault::NO_PUBLISHER) == Verdict::GRACE);
+    CHECK(l.evaluate(24.0, Fault::NO_PUBLISHER) == Verdict::HOLDING);
+    CHECK(l.evaluate(26.0, Fault::NO_PUBLISHER) == Verdict::COOLDOWN);
+    CHECK(l.evaluate(44.0, Fault::NO_PUBLISHER) == Verdict::ACT);
     CHECK(l.current() == Step::SERVICE);  // 아직 같은 칸 (2회까지)
 
     // 두 번째 service 시도 완료 → 다음 칸(power)으로
@@ -270,16 +306,16 @@ static void test_ladder_flow()
     CHECK(l.attempts() == 0);
 
     // power 2회 → EXHAUSTED
-    CHECK(l.evaluate(80.0, Fault::RX_TIMEOUT) == Verdict::HOLDING);
-    CHECK(l.evaluate(81.0, Fault::RX_TIMEOUT) == Verdict::ACT);
+    CHECK(l.evaluate(80.0, Fault::NO_PUBLISHER) == Verdict::HOLDING);
+    CHECK(l.evaluate(81.0, Fault::NO_PUBLISHER) == Verdict::ACT);
     l.on_action_started(81.0);
     l.on_action_finished(100.0);
-    CHECK(l.evaluate(140.0, Fault::RX_TIMEOUT) == Verdict::HOLDING);
-    CHECK(l.evaluate(141.0, Fault::RX_TIMEOUT) == Verdict::ACT);
+    CHECK(l.evaluate(140.0, Fault::NO_PUBLISHER) == Verdict::HOLDING);
+    CHECK(l.evaluate(141.0, Fault::NO_PUBLISHER) == Verdict::ACT);
     l.on_action_started(141.0);
     l.on_action_finished(160.0);
     CHECK(l.exhausted());
-    CHECK(l.evaluate(200.0, Fault::RX_TIMEOUT) == Verdict::EXHAUSTED);
+    CHECK(l.evaluate(200.0, Fault::NO_PUBLISHER) == Verdict::EXHAUSTED);
     CHECK(l.total_actions() == 4);
 
     // 예측: 정상으로 돌아와 600초 유지되면 사다리 초기화
@@ -296,14 +332,14 @@ static void test_ladder_recovers_between()
     // 예측: 행동 1회 후 정상 복귀 → 다시 고장 나도 같은 칸 유지(2회째), 이후 다음 칸
     Ladder l(policy_two_steps());
     l.reset(0.0);
-    CHECK(l.evaluate(11.0, Fault::RX_TIMEOUT) == Verdict::HOLDING);
-    CHECK(l.evaluate(12.0, Fault::RX_TIMEOUT) == Verdict::ACT);
+    CHECK(l.evaluate(11.0, Fault::NO_PUBLISHER) == Verdict::HOLDING);
+    CHECK(l.evaluate(12.0, Fault::NO_PUBLISHER) == Verdict::ACT);
     l.on_action_started(12.0);
     l.on_action_finished(15.0);
     CHECK(l.evaluate(30.0, Fault::NONE) == Verdict::HEALTHY);
     CHECK(l.evaluate(100.0, Fault::NONE) == Verdict::HEALTHY);
-    CHECK(l.evaluate(200.0, Fault::RX_TIMEOUT) == Verdict::HOLDING);
-    CHECK(l.evaluate(201.0, Fault::RX_TIMEOUT) == Verdict::ACT);
+    CHECK(l.evaluate(200.0, Fault::NO_PUBLISHER) == Verdict::HOLDING);
+    CHECK(l.evaluate(201.0, Fault::NO_PUBLISHER) == Verdict::ACT);
     CHECK(l.current() == Step::SERVICE);
     CHECK(l.attempts() == 1);
 }
@@ -313,9 +349,9 @@ static void test_ladder_per_fault_hold()
     // 예측: 같은 Ladder 에서 hold 를 10초로 주면 10초 전엔 HOLDING, 지나면 ACT
     Ladder l(policy_two_steps());
     l.reset(0.0);
-    CHECK(l.evaluate(20.0, Fault::LOW_HZ, 10.0) == Verdict::HOLDING);
-    CHECK(l.evaluate(29.9, Fault::LOW_HZ, 10.0) == Verdict::HOLDING);
-    CHECK(l.evaluate(30.0, Fault::LOW_HZ, 10.0) == Verdict::ACT);
+    CHECK(l.evaluate(20.0, Fault::DIAG_ERROR, 10.0) == Verdict::HOLDING);
+    CHECK(l.evaluate(29.9, Fault::DIAG_ERROR, 10.0) == Verdict::HOLDING);
+    CHECK(l.evaluate(30.0, Fault::DIAG_ERROR, 10.0) == Verdict::ACT);
 }
 
 static void test_ladder_empty()
@@ -325,7 +361,7 @@ static void test_ladder_empty()
     p.ladder.clear();
     Ladder l(p);
     l.reset(0.0);
-    CHECK(l.evaluate(20.0, Fault::RX_TIMEOUT) == Verdict::EXHAUSTED);
+    CHECK(l.evaluate(20.0, Fault::NO_PUBLISHER) == Verdict::EXHAUSTED);
     CHECK(l.evaluate(21.0, Fault::NONE) == Verdict::HEALTHY);
 }
 
@@ -340,19 +376,19 @@ static void test_ladder_defer()
     l.reset(0.0);
 
     // 예측: 15초부터 고장 → 17초에 ACT
-    CHECK(l.evaluate(15.0, Fault::RX_TIMEOUT) == Verdict::HOLDING);
-    CHECK(l.evaluate(17.0, Fault::RX_TIMEOUT) == Verdict::ACT);
+    CHECK(l.evaluate(15.0, Fault::NO_PUBLISHER) == Verdict::HOLDING);
+    CHECK(l.evaluate(17.0, Fault::NO_PUBLISHER) == Verdict::ACT);
 
     // 예측: 형제 센서가 20초에 유닛을 재시작 → 이 센서는 유예(30초까지), 시도 횟수 0 유지
     l.defer(20.0);
-    CHECK(l.evaluate(25.0, Fault::RX_TIMEOUT) == Verdict::GRACE);
+    CHECK(l.evaluate(25.0, Fault::NO_PUBLISHER) == Verdict::GRACE);
     CHECK(l.attempts() == 0);
     CHECK(l.bad_since() < 0.0);
 
     // 예측: 유예 뒤에도 고장이면 hold 를 다시 세고(32초), 그 뒤엔 쿨다운(50초까지)에 걸린다
-    CHECK(l.evaluate(30.5, Fault::RX_TIMEOUT) == Verdict::HOLDING);
-    CHECK(l.evaluate(33.0, Fault::RX_TIMEOUT) == Verdict::COOLDOWN);
-    CHECK(l.evaluate(50.0, Fault::RX_TIMEOUT) == Verdict::ACT);
+    CHECK(l.evaluate(30.5, Fault::NO_PUBLISHER) == Verdict::HOLDING);
+    CHECK(l.evaluate(33.0, Fault::NO_PUBLISHER) == Verdict::COOLDOWN);
+    CHECK(l.evaluate(50.0, Fault::NO_PUBLISHER) == Verdict::ACT);
 }
 
 static void test_common_cause()
@@ -464,15 +500,17 @@ static void test_cdr_first_int()
 int main()
 {
     test_cdr();
-    test_healthy();
-    test_rx_timeout();
-    test_graph_first();
-    test_stamp_not_advancing();
-    test_stamp_backward_and_invalid();
-    test_too_small();
-    test_too_small_does_not_mask();
-    test_low_hz();
-    test_age();
+    test_graph_only_healthy();
+    test_graph_faults();
+    test_duplicate();
+    test_duplicate_with_diag();
+    test_graph_before_diag();
+    test_diag_stale();
+    test_diag_error();
+    test_diag_error_level_warn();
+    test_diag_stale_over_error();
+    test_reset_clears_diag();
+    test_join_faults();
     test_ladder_flow();
     test_ladder_recovers_between();
     test_ladder_empty();

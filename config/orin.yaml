@@ -1,19 +1,17 @@
 # Orin 쪽 설정: Orin 에 와치독을 직접 올리는 경우에만 쓴다. (IPC 에서 SSH 로 재시작하는 기본 구성에서는 불필요)
 # 실행: ros2 run sensor_watchdog watchdog_node --ros-args -r __node:=watchdog_orin --params-file orin.yaml
+#
+# 센서 토픽은 구독하지 않는다. 발행자 유무(count_publishers), 노드 유무(node_name), 드라이버 /diagnostics 만 본다.
 
 /**:
   ros__parameters:
     use_sim_time: false
     dry_run: true
-    raw_log_dir: "~/.local/state/sensor_watchdog"
-    raw_log_max_mb: 100.0
+    log_dir: "~/.local/state/sensor_watchdog"
+    log_max_mb: 20.0
 
     # 안전 게이트: 기어가 P(22)일 때만 복구 행동을 허용한다. ipc.yaml 과 같은 토픽.
-    # Orin 이 IPC 와 같은 ROS_DOMAIN_ID 라면 /vehicle/status/gear_status 가 보인다.
-    # 안 보이면 gate_topic 을 "" 로 두고 (항상 허용) 기록으로 확인한다.
-    #   autoware_vehicle_msgs/msg/GearReport = { builtin_interfaces/Time stamp; uint8 report }
-    # 테스트 중이라 게이트를 꺼 둔다(""): 기어가 D단이어도 바로 껐다 켠다.
-    # 상용화 전에 켜려면 "" 를 /vehicle/status/gear_status 로 바꾸면 된다. 아래 설정은 그대로 둔다.
+    # 테스트 중이라 꺼 둔다(""). 켜려면 /vehicle/status/gear_status (Orin 이 IPC 와 같은 ROS_DOMAIN_ID 여야 보임).
     gate_topic: ""
     gate_type: autoware_vehicle_msgs/msg/GearReport
     gate_prefix: stamp          # none | stamp | header
@@ -21,8 +19,6 @@
     gate_ok_value: 22           # PARK
     gate_reliable: true
     gate_timeout_sec: 1.0
-    # -1: 항상 게이트를 따른다 (주행 중엔 BLOCKED_GATE 로 기다리고 P단이 되면 재시작).
-    # 양수(예: 30): 고장이 그 시간 이상 계속되면 주행 중이라도 재시작한다.
     gate_bypass_after_sec: -1.0
 
     # 센서가 하나뿐이라 공통 원인 판정은 사실상 비활성(2개 이상 필요)
@@ -38,10 +34,8 @@
     startup_grace_sec: 10.0
     fault_hold_sec: 2.0
 
-    # 확실한 끊김. fault_hold_sec 뒤 재시작.
-    act_on_faults: ["RX_TIMEOUT", "NO_PUBLISHER", "NODE_NOT_VISIBLE"]
-    # 애매한 고장(주기 저하, 타임스탬프 정지·역행). 이만큼 계속돼야 재시작. 잠깐 튀는 건 무시.
-    act_on_faults_slow: ["LOW_RX_HZ", "STAMP_NOT_ADVANCING", "STAMP_INVALID_OR_BACKWARD"]
+    act_on_faults: ["NODE_NOT_VISIBLE", "NO_PUBLISHER", "DIAG_STALE"]
+    act_on_faults_slow: ["DIAG_ERROR"]
     slow_fault_hold_sec: 5.0
     cooldown_sec: 30.0
     attempts_per_step: 2
@@ -53,21 +47,10 @@
 
     camera:
       topic: /CHANGE_ME_CAMERA_TOPIC
-      type: sensor_msgs/msg/CompressedImage     # 실제 타입으로. Image 면 그대로 바꾼다
-      node_name: ""
+      node_name: ""                 # ros2 node list 로 확인해 채우면 노드 사라짐도 잡는다
       lifecycle_node: ""
       unit: cam.service
       # power_cmd: ["/home/USER/.local/bin/power_cycle.sh"]
-
-      timeout_sec: 1.0
-      stamp_timeout_sec: 1.0
-      min_hz: 5.0
-      hz_window_sec: 5.0
-      min_bytes: 1
-      check_stamp_progress: true
-      check_stamp_age: false
-      max_age_sec: 0.5
-      qos:
-        reliability: best_effort
-        durability: volatile
-        depth: 5
+      # diag_names: ["camera"]      # 카메라 드라이버가 /diagnostics 를 내면 그 이름 조각 (빈 리스트 [] 는 쓰지 말 것)
+      diag_timeout_sec: 3.0
+      diag_error_level: 2

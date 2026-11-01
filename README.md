@@ -1,6 +1,8 @@
 # sensor_watchdog
 
-ROS 2 Humble 용 센서 감시·자동 복구 노드입니다. 라이다, GPS, 카메라 같은 센서 토픽이 끊기면 알아채고, 정해진 조건에서만 센서 프로세스를 껐다 켜며, 센서 상태를 `/diagnostics` 로 계속 알립니다.
+ROS 2 Humble 용 센서 감시·자동 복구 노드입니다. 라이다, GPS, 카메라 드라이버가 죽거나 사라지면 알아채고, 정해진 조건에서만 센서 프로세스를 껐다 켜며, 센서 상태를 `/diagnostics` 로 계속 알립니다.
+
+**센서 토픽은 구독하지 않습니다.** 실차에서 구독자가 하나 더 붙으면 라이다 발행 주기가 떨어지는 현상이 있어서, 감시 근거를 DDS 그래프(발행자·노드 유무)와 드라이버가 내는 `/diagnostics` 로만 제한합니다. 와치독이 구독하는 토픽은 `/diagnostics` 하나뿐입니다.
 
 ![sensor_watchdog 한눈에 보기](docs/overview.png)
 
@@ -35,35 +37,38 @@ ROS 2 Humble 용 센서 감시·자동 복구 노드입니다. 라이다, GPS, �
 
 ## 무엇을 해결하나
 
-실차에서 센서 드라이버는 가끔 멈춥니다. 프로세스는 살아 있는데 데이터만 안 나오는 경우가 특히 골치입니다. 사람이 터미널을 보고 있다가 Ctrl+C 로 끄고 다시 켜는 건 주행 중엔 불가능합니다.
+실차에서 센서 드라이버는 가끔 죽습니다. 사람이 터미널을 보고 있다가 Ctrl+C 로 끄고 다시 켜는 건 주행 중엔 불가능합니다.
 
 이 패키지는 그 일을 대신합니다. 단, 아무 때나 재시작하면 더 위험하기 때문에 다음 원칙을 지킵니다.
 
 | 원칙 | 구현 |
 |---|---|
-| 확실히 끊긴 것만 건드린다 | 메시지가 **3초** 동안 하나도 안 오거나, 발행자/노드가 사라진 경우만 재시작. 주기가 떨어지거나 타임스탬프가 이상한 건 기록만 |
-| 센서 탓이 아니면 건드리지 않는다 | 여러 센서가 동시에 죽으면 네트워크나 호스트 문제로 보고 재시작하지 않음 |
+| 센서 데이터 경로에 손대지 않는다 | 센서 토픽을 구독하지 않는다. DDS 디스커버리 정보(발행자 수, 노드 목록)와 드라이버 `/diagnostics` 만 본다. 실측: 와치독 유무에 따른 라이다 수신 Hz 차이 0 |
+| 확실히 죽은 것만 건드린다 | 발행자가 사라졌거나, 노드가 사라졌거나, 드라이버 diag 보고가 끊긴 경우만 재시작. 드라이버가 스스로 ERROR 라고 보고하면 5초 더 지켜본 뒤 |
+| 센서 탓이 아니면 건드리지 않는다 | 여러 복구 단위(유닛)가 동시에 죽으면 네트워크나 호스트 문제로 보고 재시작하지 않음 |
+| 중복은 내가 띄운 것만 끈다 | 같은 토픽 발행자가 둘이면 `DUPLICATE`. 와치독이 직접 띄운 유닛이면 그 유닛만 `systemctl stop`. 남이 띄운 것은 보고만 |
 | 재시작은 가벼운 것부터 | lifecycle 재활성화 → 서비스 재시작 → 전원 리셋 순서. 단계당 2회 |
 | 무한 반복하지 않는다 | 사다리 끝까지 실패하면 `EXHAUSTED` 로 표시하고 사람을 기다림 |
 | 다른 노드가 알 수 있어야 한다 | 상태를 표준 `/diagnostics` 토픽으로 1초마다 발행 |
 | 감시하는 놈도 감시받는다 | systemd 가 5초마다 생존 확인. 작은 MCU 에 UDP 하트비트 |
-| 켜기 전에 데이터부터 본다 | 메시지마다 원시 CSV 기록. 감지 전용 모드로 운행 후 기준 충족 시 활성화 |
+
+**설계상 한계.** 발행자는 살아 있는데 데이터만 멈추는 고장은, 드라이버가 `/diagnostics` 를 내지 않으면 잡지 못합니다. 실차 백(bag1512)의 rslidar·GPS 드라이버는 diag 를 내지 않습니다. 그런 고장까지 잡으려면 드라이버에 `diagnostic_updater` 를 붙이고 `diag_names` 를 채웁니다.
 
 ---
 
 ## 30초 요약: 어떻게 동작하나
 
 ```
-센서 토픽 ──▶ 와치독 (0.2초마다 검사)
-                │
-                ├─ 정상?  → /diagnostics 에 OK
-                │
-                ├─ 1초 끊김 → /diagnostics 에 ERROR (플래너가 알 수 있음)
-                │
-                └─ 3초 끊김 → "systemctl --user restart lidar" 실행
-                               │
-                               └─ systemd 가 런치 안의 모든 노드를 끄고 다시 켬
-                                  10초 유예 후 다시 검사
+DDS 그래프 ──▶ 와치독 (0.2초마다 묻기. 구독 없음)
+/diagnostics      │
+                  ├─ 발행자 1개, 노드 있음, diag OK → /diagnostics 에 OK
+                  │
+                  ├─ 발행자 0개 / 노드 없음 / diag 끊김 → ERROR 보고, 2초 지속되면
+                  │       "systemctl --user restart lidar" 실행
+                  │        └─ systemd 가 런치 안의 모든 노드를 끄고 다시 켬. 10초 유예 후 다시 검사
+                  │
+                  └─ 발행자 2개 (중복) → 와치독이 띄운 유닛이면 "systemctl --user stop lidar"
+                                        남이 띄운 거면 DUPLICATE_NOT_OURS 로 보고만
 ```
 
 와치독은 센서를 직접 죽이지 않습니다. systemd 한테 "저거 껐다 켜줘" 하고 부탁만 합니다. 실제로 프로세스를 끄고 켜는 건 systemd 가 하고, 자식 프로세스까지 남김없이 정리합니다.
@@ -79,7 +84,8 @@ ROS 2 Humble 용 센서 감시·자동 복구 노드입니다. 라이다, GPS, �
 │   systemd ─┬─ lidar.service     (ros2 launch ... 라이다)    │
 │            ├─ rtk-gps.service   (ros2 launch ... GPS)       │
 │            └─ sensor-watchdog.service  (ipc.yaml)           │
-│                   ├─ 라이다·GPS·카메라 토픽 구독 (DDS)        │
+│                   ├─ 그래프 조회: 발행자 수·노드 목록 (구독 없음)│
+│                   ├─ /diagnostics 구독 (드라이버 보고)         │
 │                   ├─ /diagnostics 발행 ──────▶ 플래너        │
 │                   ├─ 게이트 토픽 구독 (예: /ad_can/gear)      │
 │                   ├─ UDP 하트비트 ───────────▶ 안전 MCU      │
@@ -105,10 +111,13 @@ Orin 에도 와치독을 따로 올리고 싶다면(망이 불안정하거나 SS
 ```
 sensor_watchdog/
 ├── include/sensor_watchdog/
-│   ├── health.hpp          판정 로직 + 복구 사다리 + 공통 원인 판정 (ROS 의존 없음)
-│   └── cdr_header.hpp      직렬화된 메시지에서 header.stamp 와 첫 정수 필드만 읽기
-├── src/watchdog.cpp        ROS 노드. 구독, /diagnostics 발행, systemctl 호출, 기록
-├── test/test_health.cpp    ROS 없이 돌아가는 단위 테스트
+│   ├── health.hpp          판정 로직(그래프·diag) + 복구 사다리 + 공통 원인 판정 (ROS 의존 없음)
+│   └── cdr_header.hpp      게이트 토픽의 첫 정수 필드만 읽기
+├── src/watchdog.cpp        ROS 노드. 그래프 조회, /diagnostics 구독·발행, systemctl 호출, 기록
+├── test/
+│   ├── test_health.cpp     ROS 없이 돌아가는 단위 테스트
+│   ├── bag_fault_test.py   실차 로스백으로 13개 고장 시나리오 자동 테스트
+│   └── test_bag_diag_check.py
 ├── config/
 │   ├── ipc.yaml            IPC 용. 실차 bag 기준 라이다 4대 + GPS (+ 카메라 자리). 기본 구성
 │   └── orin.yaml           Orin 에 와치독을 따로 올릴 때만
@@ -118,6 +127,10 @@ sensor_watchdog/
 │   ├── cam.service
 │   └── sensor-watchdog.service
 ├── scripts/
+│   ├── watchdog_on.sh      와치독 켜기 (유닛이 있으면 유닛, 없으면 직접 실행)
+│   ├── watchdog_off.sh     와치독 끄기
+│   ├── bag_diag_check.py   백에서 "diag 만 봐도 잡혔을까" 대조
+│   ├── hz_ab_test.py       구독자 하나 더 붙을 때 Hz 영향 A/B 측정
 │   ├── env.bash.example    서비스가 source 할 ROS 환경 파일 틀
 │   └── power_cycle.sh.example   전원 리셋 스크립트 틀 (수단이 있을 때만)
 ├── CMakeLists.txt
@@ -183,13 +196,10 @@ export ROS_DOMAIN_ID=101                           # 실차 도메인. 와치독
 
 ```yaml
 front_m1p:
-  topic: /front_m1p/rslidar_points       # bag 에서 확인한 이름
-  type: sensor_msgs/msg/PointCloud2
+  topic: /front_m1p/rslidar_points       # bag 에서 확인한 이름. 발행자 수만 센다 (구독 안 함, 타입 불필요)
+  node_name: ""                          # ros2 node list 로 확인해 채우면 노드 사라짐·중복도 잡는다
   unit: lidar.service                    # 네 대가 한 런치면 모두 같은 유닛
-  qos:
-    reliability: best_effort             # 발행자가 reliable 이어도 best_effort 구독은 호환됨
-    durability: volatile
-    depth: 1                             # 헤더만 읽으므로 큐를 쌓지 않음
+  # diag_names: ["rslidar"]              # 드라이버가 /diagnostics 를 내면 그 이름 조각 (rslidar_sdk 는 안 냄)
 ```
 
 같은 `unit` 을 쓰는 센서는 하나의 **복구 단위**로 묶입니다. 어느 한 대가 끊겨 유닛을 재시작하면 나머지는 유예(GRACE)로 들어가고 같은 틱에 중복 재시작하지 않습니다.
@@ -308,6 +318,8 @@ ssh -o BatchMode=yes orin 'whoami'           # 역시 재시작만 됨
 
 | 하고 싶은 것 | 명령 |
 |---|---|
+| 와치독 켜기 | `scripts/watchdog_on.sh` (유닛이 있으면 `systemctl --user start sensor-watchdog`, 없으면 직접 띄움. `--live` 면 dry_run 끔) |
+| 와치독 끄기 | `scripts/watchdog_off.sh` |
 | 센서 켜기 | `systemctl --user start lidar` |
 | 센서 끄기 | `systemctl --user stop sensor-watchdog` 먼저, 그다음 `systemctl --user stop lidar` |
 | 카메라 켜고 끄기 | Orin 에서 `systemctl --user start cam` / `stop cam` |
@@ -316,7 +328,6 @@ ssh -o BatchMode=yes orin 'whoami'           # 역시 재시작만 됨
 | 센서 로그 | `journalctl --user -u lidar -f` |
 | 와치독 로그 | `journalctl --user -u sensor-watchdog -f` |
 | 상태 토픽 | `ros2 topic echo /diagnostics` |
-| 원시 기록 | `tail -f ~/.local/state/sensor_watchdog/lidar.csv` |
 | 사건 기록 | `tail -f ~/.local/state/sensor_watchdog/events.csv` |
 
 **끄는 순서 주의.** 와치독이 켜진 채로 센서만 끄면, 와치독이 "발행자가 사라졌다"고 보고 2초 뒤 다시 켭니다.
@@ -331,90 +342,87 @@ ssh -o BatchMode=yes orin 'whoami'           # 역시 재시작만 됨
 |---|---|---|
 | `[lidar] GRACE` | 시작 직후 10초 유예. 아직 판정 안 함 | 기다림 |
 | `[lidar] HEALTHY` | 정상 | 없음 |
-| `[lidar] HOLDING: RX_TIMEOUT` | 1초 이상 끊김. 2초 더 지켜보는 중 | 보통 혼자 돌아옴 |
-| `[lidar] COOLDOWN: RX_TIMEOUT` | 고장인데 직전 재시작 후 30초 안 지남 | 기다림 |
-| `[lidar] MONITOR_ONLY: LOW_RX_HZ` | 고장이지만 재시작 대상 아님 (주기 저하 등) | 로그만 확인 |
+| `[lidar] HOLDING: NO_PUBLISHER` | 발행자가 사라짐. 2초 더 지켜보는 중 | 보통 디스커버리 흔들림이면 혼자 돌아옴 |
+| `[lidar] COOLDOWN: NO_PUBLISHER` | 고장인데 직전 재시작 후 30초 안 지남 | 기다림 |
+| `[lidar] MONITOR_ONLY: DIAG_ERROR` | 고장이지만 재시작 대상 아님 (설정에서 뺀 경우) | 로그만 확인 |
+| `[lidar] DUPLICATE_NOT_OURS: DUPLICATE` | 발행자가 둘인데 와치독이 띄운 게 아님 | 누가 따로 띄웠는지 확인해서 손으로 정리 |
+| `[lidar] DUPLICATE: 2 publishers on ...; stopping the unit we started` | 와치독이 띄운 유닛이 중복의 한쪽. 그 유닛을 끄는 중 | 남은 쪽이 정상인지 확인 |
 | `[lidar] BLOCKED_COMMON_CAUSE` | 여러 복구 단위(유닛)가 동시에 죽음. 센서 탓 아님 | 네트워크·호스트 확인 |
 | `[rear_m1p] WAIT_SHARED_ACTION` | 같은 유닛을 다른 센서가 이미 재시작 중 | 기다리면 됨 |
 | `[lidar] BLOCKED_GATE` | 차량 쪽이 재시작 허가 안 함 | 정차 후 자동 진행 |
 | `[lidar] DRY_RUN_WOULD_service` | 감지 전용 모드. "원래면 지금 재시작했다" | 오탐인지 확인 |
 | `[lidar] ACTION restart lidar.service (step 1, attempt 1, total 1)` | 실제 재시작 중 | 10초 뒤 결과 확인 |
 | `[lidar] action done exit=0; re-checking after grace` | 명령 끝남. 성공 여부는 다음 판정에서 | |
-| `[lidar] EXHAUSTED: RX_TIMEOUT — human needed` | 사다리 끝까지 실패 | 직접 확인 |
-| `NO_MATCHED_PUBLISHER_CHECK_QOS_TYPE` | 발행자는 있는데 나한테 안 옴 | yaml 의 type, qos 를 `ros2 topic info --verbose` 와 맞춤 |
+| `[lidar] EXHAUSTED: NO_PUBLISHER — human needed` | 사다리 끝까지 실패 | 직접 확인 |
 
 고장 코드 전체:
 
-| 코드 | 뜻 | 재시작 대상 (기본) |
-|---|---|---|
-| `NODE_NOT_VISIBLE` | 설정한 노드 이름이 그래프에 없음 | O |
-| `NO_PUBLISHER` | 토픽 발행자가 없음 | O |
-| `NO_MATCHED_PUBLISHER_CHECK_QOS_TYPE` | 발행자는 있으나 QoS/타입 불일치로 매칭 안 됨 | X (설정 문제) |
-| `RX_TIMEOUT` | `timeout_sec` 동안 메시지 없음 | O |
-| `TOO_SMALL` | 메시지가 `min_bytes` 보다 작음 | X |
-| `STAMP_INVALID_OR_BACKWARD` | 타임스탬프가 비정상이거나 뒤로 감 | 5초 지속 시 |
-| `STAMP_AGE_OR_CLOCK` | 메시지가 너무 오래됨 (`check_stamp_age` 켰을 때만) | X |
-| `STAMP_NOT_ADVANCING` | 메시지는 오는데 타임스탬프가 안 바뀜 | 5초 지속 시 |
-| `LOW_RX_HZ` | 수신 주기가 `min_hz` 미만 | 5초 지속 시 |
+| 코드 | 뜻 | 근거 | 재시작 대상 (기본) |
+|---|---|---|---|
+| `NODE_NOT_VISIBLE` | 설정한 노드 이름이 그래프에 없음 (프로세스 죽음) | 그래프 | O (2초) |
+| `NO_PUBLISHER` | 토픽 발행자가 0개 (프로세스 죽음 또는 아직 안 뜸) | 그래프 | O (2초) |
+| `DIAG_STALE` | 드라이버 diag 보고가 `diag_timeout_sec` 넘게 끊김 (프로세스는 있는데 멈춤) | `/diagnostics` | O (2초) |
+| `DIAG_ERROR` | 드라이버 diag 가 ERROR (드라이버 스스로 고장을 보고) | `/diagnostics` | O (5초 지속 시) |
+| `DUPLICATE` | 발행자가 `max_publishers` 보다 많거나 같은 이름 노드가 둘 이상 | 그래프 | 재시작 아님. 와치독이 띄운 유닛이면 그 유닛만 stop |
 
 ---
 
 ## 동작 원리 자세히
 
-### 1. 듣기: 메시지를 풀지 않고 헤더만 읽는다
+### 1. 묻기: 구독하지 않고 그래프를 본다
 
-와치독은 `GenericSubscription` 으로 토픽을 받습니다. 메시지를 C++ 객체로 풀지(역직렬화) 않고, 직렬화된 바이트에서 `header.stamp` 위치만 읽습니다. 포인트클라우드가 메가바이트 단위여도 와치독 CPU 부하는 거의 없습니다.
+와치독은 센서 토픽을 구독하지 않습니다. 0.2초마다 ROS 그래프 API 로 두 가지를 묻습니다.
 
-sensor_msgs 의 PointCloud2, Image, CompressedImage, NavSatFix, Imu 모두 첫 필드가 `std_msgs/Header` 라서 같은 코드로 처리됩니다. 설정의 `type` 문자열만 바꾸면 됩니다.
+- `count_publishers(topic)`: 이 토픽에 발행자가 몇 개인가 (DDS 디스커버리 정보. 데이터 경로와 무관)
+- `get_node_names()`: 설정한 `node_name` 이 몇 번 나오는가 (`node_name` 을 채운 센서만)
 
-메시지가 올 때마다 세 가지를 적습니다.
+둘 다 로컬 디스커버리 캐시를 읽는 것이라 발행자에게는 아무 영향이 없습니다. 실차 백으로 와치독 없이/있이 수신 Hz 를 비교하면 라이다 4대 10.00 → 10.00 Hz, GPS 19.99 → 19.99 Hz 로 차이가 없고, 센서 토픽 구독자 수도 늘지 않습니다(`hz_impact` 테스트).
 
-- 도착 시각 (`steady_clock`. 시스템 시각이 바뀌어도 안 튐)
-- 메시지 안의 타임스탬프
-- 바이트 크기
+드라이버가 `/diagnostics` 를 낸다면(diagnostic_updater 를 쓰는 드라이버: velodyne, ouster, ublox 등) `diag_names` 에 그 status 이름 조각을 적습니다. 그러면 와치독이 `/diagnostics` 하나를 구독해서 그 센서의 보고 level 과 보고 간격을 봅니다. 이건 수십 바이트짜리 1 Hz 토픽이라 부하가 없습니다.
 
-### 2. 판정: 0.2초마다 9가지 검사
-
-위에서부터 순서대로 봅니다. 1~4 는 "데이터가 없다"는 뜻이라 걸리면 그것 하나만 보고하고 끝냅니다. 데이터가 오고 있으면 5~9 를 **모두** 검사해서 해당되는 고장을 전부 모읍니다.
+### 2. 판정: 0.2초마다 네 가지 검사
 
 ```
-1. 노드가 그래프에 있나?          (node_name 설정 시)
-2. 발행자가 있나?
-3. 내 구독과 매칭됐나?            (QoS/타입)
-4. timeout_sec 안에 메시지 왔나?   ← "끊김"의 핵심
+1. 노드가 그래프에 있나?            (node_name 설정 시)        없으면 NODE_NOT_VISIBLE
+2. 발행자가 있나?                                              0개면 NO_PUBLISHER
 ---- 여기부터는 해당되는 것 전부 ----
-5. 타임스탬프가 정상인가?
-6. 타임스탬프가 너무 오래되지 않았나? (check_stamp_age 켰을 때)
-7. 타임스탬프가 전진하나?
-8. 수신 주기가 min_hz 이상인가?
-9. 크기가 min_bytes 이상인가?      ← 가장 뒤. 기록만 하는 고장이라 다른 고장을 가리면 안 됨
+3. 발행자(또는 노드)가 둘 이상인가?                             DUPLICATE
+4. 드라이버 diag 가 정상인가?        (diag_names 설정 시)       보고 끊김 DIAG_STALE / ERROR 면 DIAG_ERROR
 → 전부 통과하면 HEALTHY
 ```
 
-재시작 여부는 모인 고장 중 **하나라도** 행동 대상이면 결정됩니다(OR). 로그와 `/diagnostics` 의 `fault` 에는 행동 대상 중 가장 앞의 고장이, `faults` 에는 전부가 `A+B` 꼴로 실립니다. 예를 들어 드라이버가 빈 클라우드를 같은 타임스탬프로 반복하면 `fault=STAMP_NOT_ADVANCING`, `faults=STAMP_NOT_ADVANCING+TOO_SMALL` 로 보고하고 재시작합니다. 크기만 작고 나머지가 정상이면 `TOO_SMALL` 만 남아 기록만 합니다.
+1, 2 는 "데이터 출처가 없다"는 뜻이라 걸리면 그것 하나만 보고합니다. 발행자가 있으면 3, 4 를 모두 검사해서 `faults` 에 `A+B` 꼴로 전부 싣고, 재시작 여부는 그중 **하나라도** 행동 대상이면 결정됩니다(OR).
 
-### 3. "끊겼다"의 정의
+### 3. "죽었다"의 정의
 
 ```
-메시지 끊김
-  ↓ 1.0초 (timeout_sec)        RX_TIMEOUT 판정. /diagnostics 에 ERROR
-  ↓ 2.0초 (fault_hold_sec)     고장이 계속되면
-  = 3.0초                      재시작
+발행자 사라짐
+  ↓ 즉시                          NO_PUBLISHER 판정. /diagnostics 에 ERROR
+  ↓ 2.0초 (fault_hold_sec)        고장이 계속되면
+  = 2.0초                         재시작
 ```
 
-중간에 메시지가 하나라도 오면 처음부터 다시 셉니다. 연속 3초여야 합니다.
+중간에 발행자가 돌아오면 처음부터 다시 셉니다. DDS 디스커버리가 잠깐 흔들려 0.5초 사라졌다 돌아오는 경우는 `HOLDING` 만 거치고 행동하지 않습니다(`flap` 테스트).
 
-발행자 없음·노드 없음은 그래프를 보고 즉시 알 수 있어서 `fault_hold_sec` 만 적용돼 약 2초입니다. 단, 드라이버가 강제로 죽거나 멈춘 경우 DDS 가 그걸 알아채는 데 10~20초가 걸릴 수 있어서, 실제로는 거의 항상 `RX_TIMEOUT` 쪽이 먼저 잡습니다.
+주의할 점: 드라이버가 강제로 죽거나(SIGKILL) 호스트가 멈추면 DDS 가 발행자 소멸을 알아채는 데 수 초~수십 초가 걸릴 수 있습니다(참여자 liveliness lease). 정상 종료(SIGINT)는 즉시 알려집니다. 그 사이는 `diag_names` 가 있는 센서만 `DIAG_STALE` 로 먼저 잡습니다.
 
 ### 4. 재시작 전 세 가지 관문
 
 `ACT` 판정이 나도 바로 재시작하지 않습니다.
 
-1. **고장 종류가 행동 대상인가.** 확실한 끊김(`act_on_faults`)은 2초, 애매한 고장(`act_on_faults_slow`)은 5초 지속돼야 행동. 둘 다 아니면 `MONITOR_ONLY`.
+1. **고장 종류가 행동 대상인가.** 확실한 고장(`act_on_faults`: 노드 없음, 발행자 없음, diag 끊김)은 2초, 드라이버 자체 보고(`act_on_faults_slow`: DIAG_ERROR)는 5초 지속돼야 행동. 둘 다 아니면 `MONITOR_ONLY`. `DUPLICATE` 는 재시작 대상이 아니라 별도 처리(아래 5-1).
 2. **공통 원인이 아닌가.** `common_cause_window_sec`(3초) 안에 `common_cause_min`(기본 2개) 이상의 **복구 단위**(systemd 유닛)가 함께 죽었으면 `BLOCKED_COMMON_CAUSE`. 센서 수가 아니라 유닛 수로 셉니다. 라이다 4대가 `lidar.service` 하나에서 돌면 넷이 같이 죽어도 1개로 셉니다. 그건 그 유닛의 고장이지 공통 원인이 아니기 때문입니다. 반대로 라이다 유닛과 GPS 유닛이 같이 죽으면 IPC·DDS·네트워크 문제로 보고 재시작하지 않습니다.
 3. **같은 유닛을 다른 센서가 이미 재시작 중이 아닌가.** 진행 중이면 `WAIT_SHARED_ACTION` 으로 기다립니다. 재시작이 끝나면 그 유닛의 모든 센서가 함께 유예(GRACE)를 받습니다.
 4. **안전 게이트가 허용했는가.** (지금 설정은 `gate_topic: ""` 라 이 관문은 항상 통과) `gate_topic` 을 설정하면 그 값(예: 기어 P)이 맞을 때만 재시작하고, 아니면 `BLOCKED_GATE` 로 기다립니다. 주행 중에 라이다 유닛을 껐다 켜면 멀쩡한 라이다 3대까지 10초 넘게 사라지기 때문입니다. 주행 중이라도 일정 시간 지나면 재시작하게 하려면 `gate_bypass_after_sec` 에 초를 줍니다(기본 -1.0 = 항상 게이트 따름. YAML 에서는 소수점을 붙여야 double 로 읽힘).
 5. **`dry_run` 이 꺼져 있는가.** 켜져 있으면 `DRY_RUN_WOULD_*` 만 기록.
+
+#### 5-1. 중복 노드 처리
+
+같은 토픽에 발행자가 둘이거나 같은 이름 노드가 둘이면 `DUPLICATE` 입니다. 흔한 원인은 "재시작했는데 옛 프로세스가 안 죽었다" 또는 "사람이 터미널에서 또 띄웠다" 입니다.
+
+- 와치독이 그 유닛을 직접 띄운 적이 있으면(`started_by_watchdog: true`. service/power 행동이 끝난 뒤부터) `duplicate_hold_sec`(5초) 지속 시 **그 유닛만** `systemctl --user stop <unit>` 합니다. systemd 는 그 유닛이 띄운 프로세스만 알고 있어서(cgroup) 사람이 따로 띄운 쪽은 건드리지 않습니다. 상태는 `STOPPING_DUPLICATE`, 사다리 시도 횟수는 올라가지 않습니다.
+- 와치독이 띄운 적이 없으면 `DUPLICATE_NOT_OURS` 로 보고만 합니다. 아무것도 끄지 않습니다.
+- 재시작 직후에는 옛 발행자가 디스커버리에서 빠지기까지 몇 초 동안 둘로 보일 수 있어 유예 10초 + 5초 지속 조건을 둡니다.
 
 ### 5. 복구 사다리
 
@@ -438,19 +446,17 @@ lifecycle  →  service  →  power  →  EXHAUSTED
 ```
 name: "watchdog_ipc: lidar"
 level: 0=OK, 1=WARN(유예 중), 2=ERROR(고장)
-message: "HOLDING: RX_TIMEOUT"
-values: fault, faults, state, rx_hz, age_sec, rx_count, step, attempts_at_step, total_actions, exhausted, dry_run
+message: "HOLDING: NO_PUBLISHER"
+values: fault, faults, state, publishers, node(unchecked/visible/missing/duplicate xN), started_by_watchdog,
+        diag_level, diag_age_sec, diag_count, diag_message (diag_names 설정 시), step, attempts_at_step, total_actions, exhausted, dry_run
+요약(summary) values: gate, sensor_topic_subscriptions(항상 0)
 ```
 
 플래너는 `level` 만 보면 됩니다. `ERROR` 면 그 센서를 지금 쓰면 안 됩니다.
 
 ### 7. 기록
 
-`raw_log_dir` 아래에 두 종류.
-
-- `<센서>.csv`: 메시지마다 한 줄. `steady, ros_now, stamp_ns, bytes`. 임계값을 실측으로 정할 때 씁니다.
-- `events.csv`: 상태 변화, 행동 시작·종료, 복구까지 걸린 시간, 게이트 우회.
-- 두 종류 모두 `raw_log_max_mb`(기본 100 MB)를 넘으면 `.1` 백업 하나만 남기고 새로 시작합니다. 센서 5개 기준 원시 로그는 약 240 MB/일이라 상한 없이 두면 한 달에 7 GB 가 쌓입니다.
+`log_dir` 아래 `events.csv` 하나. 상태 변화, 행동 시작·종료, 복구까지 걸린 시간, 중복 정리, 게이트 우회. `log_max_mb`(기본 20 MB)를 넘으면 `.1` 백업 하나만 남기고 새로 시작합니다. 메시지별 원시 로그는 없습니다(구독을 안 하니까).
 
 ### 8. 와치독 자체 감시
 
@@ -468,9 +474,9 @@ values: fault, faults, state, rx_hz, age_sec, rx_count, step, attempts_at_step, 
 | 키 | 기본값 | 뜻 |
 |---|---|---|
 | `dry_run` | `true` | true 면 판정·기록만 하고 행동 안 함 |
-| `raw_log_dir` | `~/.local/state/sensor_watchdog` | 원시 CSV 와 events.csv 위치. `""` 면 끔 |
-| `raw_log_max_mb` | `100.0` | 파일당 크기 상한. 넘으면 `<파일>.1` 백업 하나만 남기고 새로 시작. 디스크 최대 (센서 수+1)×2×이 값. `0` 이면 무제한 |
-| `gate_topic` | `""` | 재시작 허가 토픽. `""` 면 항상 허용 |
+| `log_dir` | `~/.local/state/sensor_watchdog` | `events.csv` 위치. `""` 면 끔 (구 이름 `raw_log_dir` 도 받음) |
+| `log_max_mb` | `20.0` | `events.csv` 크기 상한. 넘으면 `.1` 백업 하나만 남기고 새로 시작. `0` 이면 무제한 |
+| `gate_topic` | `""` | 재시작 허가 토픽. `""` 면 항상 허용. 켜면 그 토픽 하나를 구독한다(기어 상태 같은 작은 토픽) |
 | `gate_type` | `std_msgs/msg/Bool` | 게이트 토픽 타입 |
 | `gate_prefix` | `none` | 첫 정수 필드 앞에 오는 것. `none`(바로 정수), `stamp`(`builtin_interfaces/Time` 하나), `header`(`std_msgs/Header`). autoware `GearReport` 는 `stamp` |
 | `gate_has_header` | `false` | (구버전 호환) `gate_prefix` 가 없을 때만 쓰임. `true` 면 `header` |
@@ -486,63 +492,55 @@ values: fault, faults, state, rx_hz, age_sec, rx_count, step, attempts_at_step, 
 | `heartbeat_host` | `""` | MCU IPv4 주소. `""` 면 끔 |
 | `heartbeat_port` | `5005` | |
 | `startup_grace_sec` | `10.0` | 시작·행동 직후 판정 유예 |
-| `fault_hold_sec` | `2.0` | 고장 표시 후 이만큼 더 지속돼야 행동 |
-| `act_on_faults` | `[RX_TIMEOUT, NO_PUBLISHER, NODE_NOT_VISIBLE]` | 확실한 끊김. `fault_hold_sec` 뒤 행동 |
-| `act_on_faults_slow` | `[LOW_RX_HZ, STAMP_NOT_ADVANCING, STAMP_INVALID_OR_BACKWARD]` | 애매한 고장. `slow_fault_hold_sec` 뒤 행동 |
-| `slow_fault_hold_sec` | `5.0` | 애매한 고장이 이만큼 지속돼야 행동 |
+| `fault_hold_sec` | `2.0` | 고장이 이만큼 지속돼야 행동 |
+| `act_on_faults` | `[NODE_NOT_VISIBLE, NO_PUBLISHER, DIAG_STALE]` | 확실한 고장. `fault_hold_sec` 뒤 행동 |
+| `act_on_faults_slow` | `[DIAG_ERROR]` | 드라이버 자체 보고. `slow_fault_hold_sec` 뒤 행동 |
+| `slow_fault_hold_sec` | `5.0` | |
+| `duplicate_hold_sec` | `5.0` | `DUPLICATE` 가 이만큼 지속되면, 와치독이 띄운 유닛이면 끈다 |
 | `cooldown_sec` | `30.0` | 행동 완료 후 다음 행동까지 최소 간격 |
 | `attempts_per_step` | `2` | 같은 칸 시도 횟수 |
 | `healthy_reset_sec` | `600.0` | 이만큼 정상이면 사다리 초기화 |
-| `ladder` | `[lifecycle, service, power]` | 복구 순서 |
+| `ladder` | `[service]` (설정 파일은 `[lifecycle, service]`) | 복구 순서 |
 | `sensors` | | 감시할 센서 id 목록 |
 
 ### 센서별 (`<id>.` 아래)
 
 | 키 | 기본값 | 뜻 |
 |---|---|---|
-| `topic` | 필수 | `/` 로 시작 |
-| `type` | 필수 | 예: `sensor_msgs/msg/PointCloud2`. 첫 필드가 Header 인 타입 |
-| `node_name` | `""` | 설정하면 노드 존재 검사. `/` 로 시작 |
+| `topic` | 필수 | `/` 로 시작. 발행자 수를 세는 데만 쓴다 (구독하지 않음). 타입은 필요 없다 |
+| `node_name` | `""` | 설정하면 노드 존재·중복 검사. `/` 로 시작. `ros2 node list` 로 확인 |
+| `max_publishers` | `1` | 이보다 발행자가 많으면 `DUPLICATE` |
+| `diag_names` | 없음 | `/diagnostics` 에서 이 센서로 볼 status 이름 조각 목록. 설정하면 `DIAG_STALE`/`DIAG_ERROR` 검사. 빈 리스트 `[]` 는 쓰지 말고 줄을 지울 것 |
+| `diag_timeout_sec` | `3.0` | diag 보고가 이 시간 넘게 없으면 `DIAG_STALE` |
+| `diag_error_level` | `2` | 이 level 이상이면 `DIAG_ERROR` (1 WARN, 2 ERROR, 3 STALE) |
 | `lifecycle_node` | `""` | lifecycle 노드 이름. 설정 시 사다리에 lifecycle 칸 포함 |
 | `unit` | `""` | systemd 유닛 이름. 설정 시 service 칸 포함 |
 | `power_cmd` | 없음 | 전원 리셋 명령 배열. 설정 시 power 칸 포함. 빈 배열 `[]` 은 쓰지 말고 줄을 지울 것 |
 | `systemctl_cmd` | 없음 | 이 센서만 쓸 재시작 명령 앞부분. 원격 장비면 `["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "orin", "systemctl", "--user"]`. 없으면 전역 값 |
-| `timeout_sec` | `1.0` | 이 시간 메시지 없으면 RX_TIMEOUT |
-| `stamp_timeout_sec` | `1.0` | 타임스탬프가 이 시간 안 바뀌면 STAMP_NOT_ADVANCING |
-| `min_hz` | `0.0` | 수신 주기 하한. 0 이면 검사 안 함 |
-| `hz_window_sec` | `5.0` | 주기 계산 구간 |
-| `min_bytes` | `1` | 메시지 크기 하한 |
-| `check_stamp_progress` | `true` | 타임스탬프 전진 검사 |
-| `check_stamp_age` | `false` | 타임스탬프 나이 검사. 장비 간 시각 동기(PTP) 후 켤 것 |
-| `max_age_sec` | `0.5` | 나이 상한 |
-| `qos.reliability` | `best_effort` | `best_effort` 또는 `reliable`. 발행자와 호환돼야 함 |
-| `qos.durability` | `volatile` | `volatile` 또는 `transient_local` |
-| `qos.depth` | `5` | |
 
 ---
 
 ## 실제 재시작을 켜기 전 절차
 
-이 숫자들(1초, 3초, 5 Hz)은 전부 예시입니다. 실제 센서에 맞는 값은 측정해서 정해야 합니다.
+이 숫자들(2초, 10초)은 전부 예시입니다. 실제 센서에 맞는 값은 측정해서 정해야 합니다.
 
 ### 1. 예상값을 먼저 적는다
 
-| 센서 | 예상 수신 간격 (평균 / 최대) | 예상 크기 (바이트) | 하루 끊김 횟수 예상 | 근거 |
+| 센서 | 재시작 후 발행자가 다시 뜨기까지 (초) | 하루 죽는 횟수 예상 | 근거 |
+|---|---|---|---|
+| lidar | | | |
+| gps | | | |
+| camera | | | |
+
+적어두고 나중에 `events.csv` 와 비교합니다. 맞으면 설정값에 근거가 생기고, 틀리면 뭘 몰랐는지 알게 됩니다.
+
+bag1512 재생으로 이미 실측한 값은 다음과 같습니다. 와치독은 이 주기를 재지 않지만(구독 안 함), 드라이버 diag 를 붙일 때 기준이 됩니다.
+
+| 센서 | 토픽 | 실측 주기 | 최대 간격 | 메시지 크기 |
 |---|---|---|---|---|
-| lidar | | | | |
-| gps | | | | |
-| camera | | | | |
-
-적어두고 나중에 원시 로그와 비교합니다. 맞으면 설정값에 근거가 생기고, 틀리면 뭘 몰랐는지 알게 됩니다.
-
-bag1512 재생으로 이미 실측한 값은 다음과 같습니다. 실차에서 다시 재면 이 표와 비교합니다.
-
-| 센서 | 토픽 | 실측 주기 | 최대 간격 | 메시지 크기 | `timeout_sec` | `min_hz` | `min_bytes` |
-|---|---|---|---|---|---|---|---|
-| front_m1p, rear_m1p | `/*_m1p/rslidar_points` | 10.03 Hz | 100 ms | 1,260,156 B 고정 | 1.0 | 5.0 | 600000 |
-| left_bp, right_bp | `/*_bp/rslidar_points` | 10.03 Hz | 100 ms | 921,75x B 고정 | 1.0 | 5.0 | 450000 |
-| gps | `/fix` | 20.05 Hz | 100 ms | 128 B 고정 | 1.0 | 10.0 | 100 |
-
+| front_m1p, rear_m1p | `/*_m1p/rslidar_points` | 10.03 Hz | 100 ms | 1,260,156 B 고정 |
+| left_bp, right_bp | `/*_bp/rslidar_points` | 10.03 Hz | 100 ms | 921,75x B 고정 |
+| gps | `/fix` | 20.05 Hz | 100 ms | 128 B 고정 |
 
 ### 2. 기본 동작을 실측한다 (각 5분, 스톱워치)
 
@@ -560,7 +558,7 @@ bag1512 재생으로 이미 실측한 값은 다음과 같습니다. 실차에�
 
 - 진짜 고장이 10회 이상 관측됐다
 - 오탐이 진짜 고장의 절반 이하다
-- 예상값 표와 원시 로그의 수신 간격 분포가 일치했다. 불일치했다면 원인을 기록했다
+- 예상값 표와 `events.csv` 의 복구 시간이 일치했다. 불일치했다면 원인을 기록했다
 - 플래너가 `/diagnostics` ERROR 를 받으면 감속·정지하는 것을 정지 상태에서 확인했다
 
 ```bash
@@ -643,17 +641,23 @@ MCU 는 IPC 에 묻지 않고 스스로 판단합니다. 지키는 쪽이 지켜
 **와치독을 끄면 센서도 꺼지나요?**
 아니요. 와치독은 감시만 합니다. 센서는 systemd 가 들고 있어서 그대로 돕니다.
 
+**왜 센서 토픽을 구독하지 않나요?**
+실차에서 구독자가 하나 더 붙으면 라이다 발행 주기가 떨어지는 현상이 있었습니다. 1.2 MB 포인트클라우드를 10 Hz 로 네 대가 내는 상황에서 구독자가 늘면 DDS 가 복사·전송할 양이 늘기 때문입니다. 와치독은 감시 때문에 데이터를 건드려선 안 되므로 디스커버리 정보와 `/diagnostics` 만 봅니다. 대신 "프로세스는 살았는데 데이터만 멈춤"은 드라이버 diag 가 있어야 잡습니다.
+
 **ROS 2 의 Deadline / Liveliness QoS 를 쓰면 되지 않나요?**
 그게 DDS 가 제공하는 "와치독용 QoS" 가 맞습니다. 안 쓴 이유는 발행자(센서 드라이버)도 같은 설정을 해야 매칭되기 때문입니다. 드라이버 기본값은 "무한" 이라, 구독자가 1초 Deadline 을 요구하면 아예 연결이 안 됩니다. 드라이버를 안 고치는 조건에서는 타이머로 직접 재는 수밖에 없습니다. 드라이버를 직접 만든다면 Deadline 으로 바꾸는 게 깔끔합니다.
 
 **전원 리셋이 IPC 재부팅인가요?**
 아닙니다. 센서 장치 하나의 전원만 끊었다 잇는 것입니다. PoE 스위치 포트, USB 허브 포트, 릴레이 등. 그런 수단이 없으면 `power_cmd` 를 설정하지 않으면 되고, 그러면 그 단계는 자동으로 빠집니다.
 
-**주기가 떨어진 센서는 언제 재시작하나요?**
-확실한 끊김은 3초면 재시작하지만, 주기 저하나 타임스탬프 이상은 5초(`slow_fault_hold_sec`) 지속돼야 재시작합니다. 잠깐 튀는 건 혼자 돌아오는 경우가 많고, 조금이라도 오는 센서를 재시작하면 10초 이상 완전히 끊기기 때문입니다. 5초 넘게 계속 이상하면 드라이버 문제로 보고 재시작합니다.
+**주기가 떨어진 센서는 어떻게 되나요?**
+와치독은 주기를 재지 않습니다(구독 안 함). 드라이버가 `/diagnostics` 로 주기 저하를 ERROR 로 보고하면 `DIAG_ERROR` 로 5초 지속 시 재시작합니다. 보고가 없는 드라이버(rslidar 등)는 주기 저하를 와치독이 모릅니다. 이 경우 플래너 쪽 `topic_state_monitor` 같은 별도 감시가 필요합니다.
 
-**카메라가 `sensor_msgs/msg/Image` 인데요?**
-`type` 만 바꾸면 됩니다. 코드 수정 없음. 첫 필드가 `std_msgs/Header` 인 타입이면 뭐든 됩니다.
+**중복 노드가 생기면요?**
+같은 토픽 발행자가 둘이면 `DUPLICATE` 입니다. 와치독이 직접 띄운 유닛(`started_by_watchdog: true`)이면 5초 뒤 그 유닛만 `systemctl stop` 합니다. 와치독이 띄운 적 없으면 `DUPLICATE_NOT_OURS` 로 보고만 합니다. 남의 프로세스는 절대 죽이지 않습니다.
+
+**카메라 타입이 `Image` 인지 `CompressedImage` 인지 적어야 하나요?**
+아니요. 타입은 설정에 없습니다. 발행자 수만 세므로 토픽 이름만 맞으면 됩니다.
 
 ---
 
@@ -669,38 +673,39 @@ g++ -std=c++17 -Wall -Wextra -I include test/test_health.cpp -o test_health
 
 colcon 으로는 `colcon test --packages-select sensor_watchdog`.
 
-테스트 항목: CDR 헤더 파싱(LE/BE), 정상 흐름, 수신 타임아웃, 그래프 고장 우선순위, 타임스탬프 정지·역행·무효, 크기 미달, 주기 저하, 타임스탬프 나이, 사다리 전체 흐름(유예→대기→행동→다음 칸→소진→초기화), 사다리 없음, 공통 원인, 게이트 필드 파싱.
+테스트 항목: CDR 첫 필드 파싱(게이트용), 그래프만 보는 센서의 정상, 노드 없음·발행자 없음 우선순위, 중복(발행자 수·노드 수·max_publishers), 중복+diag 동시 보고, diag 끊김(STALE)·ERROR·WARN 기준·끊김이 ERROR 보다 우선·reset 후 유예, 사다리 전체 흐름(유예→대기→행동→다음 칸→소진→초기화), 사다리 없음, 형제 유예, 공통 원인(센서/유닛 기준).
 
 ### 로스백으로 고장 시나리오 자동 테스트
 
-`test/bag_fault_test.py` 는 실차 백을 재생하면서 센서 토픽 하나를 중간에서 가로채 고장을 흉내 내고, 진짜 `watchdog_node` 가 `/diagnostics` 로 내보내는 상태를 받아 "기대한 시각 안에 기대한 상태가 됐는가, 다른 센서는 멀쩡한가"를 판정합니다. 진짜 `systemctl` 은 부르지 않고, 복구 시나리오는 가짜 systemctl 이 토픽을 다시 흘려 주는 방식으로 끝까지 확인합니다.
+`test/bag_fault_test.py` 는 실차 백을 재생하면서 센서 토픽 하나를 중계기로 가로채 "발행자가 사라짐", "노드가 사라짐", "중복" 같은 고장을 흉내 내고, 가짜 드라이버 diag 로 "ERROR / 보고 끊김"도 흉내 냅니다. 진짜 `watchdog_node` 가 `/diagnostics` 로 내보내는 상태를 받아 "기대한 시각 안에 기대한 상태가 됐는가, 다른 센서는 멀쩡한가, 센서 토픽 Hz 와 구독자 수가 그대로인가"를 판정합니다. 진짜 `systemctl` 은 부르지 않고, 복구·중복 시나리오는 가짜 systemctl 이 발행자를 다시 만들거나 없애는 방식으로 끝까지 확인합니다.
 
 ```bash
 source install/setup.bash
-python3 src/sensor_watchdog/test/bag_fault_test.py <백_폴더>                  # 12개 시나리오 전부 (약 10분)
-python3 src/sensor_watchdog/test/bag_fault_test.py <백_폴더> --scenario stop   # 하나만
+python3 src/sensor_watchdog/test/bag_fault_test.py <백_폴더>                     # 13개 시나리오 전부 (약 12분)
+python3 src/sensor_watchdog/test/bag_fault_test.py <백_폴더> --scenario vanish    # 하나만
 ```
 
 | 시나리오 | 넣는 고장 | 통과 조건 |
 |---|---|---|
 | `healthy` | 없음 | 전부 HEALTHY 가 되고 끝까지 유지 (오탐 없음) |
-| `stop` | 토픽 끊김 (발행자는 살아 있음) | `RX_TIMEOUT` 으로 행동, 나머지 센서 HEALTHY 유지 |
-| `vanish` | 발행자 자체가 사라짐 | `NO_PUBLISHER` 로 행동 |
+| `vanish` | 발행자 자체가 사라짐 | `NO_PUBLISHER` 로 행동, 나머지 센서 HEALTHY 유지 |
 | `node_gone` | 드라이버 노드가 사라짐 (`node_name` 검사) | `NODE_NOT_VISIBLE` 로 행동 |
-| `freeze` | stamp 멈춤 | `STAMP_NOT_ADVANCING` 으로 행동 |
-| `slow` | 3개 중 1개만 통과 (≈3.3 Hz) | `LOW_RX_HZ` 로 행동 |
-| `slow_ok` | 3개 중 2개 통과 (≈6.7 Hz, `min_hz` 이상) | 고장 아님. HEALTHY 유지 (오탐 검사) |
-| `zero_stamp` | stamp 0 | `STAMP_INVALID_OR_BACKWARD` 로 행동 |
-| `truncate` | 메시지 2 KB 로 자름 | `TOO_SMALL` 기록만, 행동 없음 |
-| `recover` | 끊김 → 재시작 요청 시 복구 | 재시작 호출 정확히 1회, 그 뒤 HEALTHY 복귀 |
-| `all_lidars` | 같은 유닛 센서 전부 끊김 | 유닛 재시작 1회, 공통 원인으로 막히지 않고 전부 복귀 |
-| `hz_impact` | 같은 구간을 와치독 없이/있이 재생 | 독립 구독자가 잰 센서 수신 Hz 가 2 % 이상 떨어지지 않음. 와치독이 보고한 `rx_hz` 도 실측과 일치 |
+| `flap` | 발행자가 0.5초 사라졌다 돌아옴 | 행동 없음 (디스커버리 흔들림 오탐 검사) |
+| `stall_blind` | 발행자는 살아 있고 데이터만 멈춤 | HEALTHY 유지. diag 없이는 못 잡는다는 설계상 한계를 고정 |
+| `diag_error` | 가짜 드라이버 diag 가 ERROR 로 바뀜 | `DIAG_ERROR` 로 5초 뒤 행동 |
+| `diag_stale` | 가짜 드라이버 diag 보고가 끊김 | `DIAG_STALE` 로 행동 |
+| `diag_warn` | 가짜 드라이버 diag 가 WARN 만 냄 | HEALTHY 유지 (오탐 검사). 관계없는 ERROR status 는 무시 |
+| `recover` | 발행자 사라짐 → 재시작 요청 시 복구 | 재시작 호출 정확히 1회, 그 뒤 HEALTHY 복귀 |
+| `all_lidars` | 같은 유닛 센서 발행자 전부 사라짐 | 유닛 재시작 1회, 공통 원인으로 막히지 않고 전부 복귀 |
+| `duplicate` | 재시작 뒤 발행자가 둘 (옛 프로세스 안 죽음) | `restart` 1회 + 와치독이 띄운 유닛 `stop` 1회, 발행자 1개로 HEALTHY 복귀 |
+| `duplicate_foreign` | 와치독과 무관하게 발행자가 둘 | `DUPLICATE_NOT_OURS` 보고만, systemctl 호출 0회 |
+| `hz_impact` | 같은 구간을 와치독 없이/있이 재생 | 독립 구독자가 잰 센서 수신 Hz 가 1 % 이상 떨어지지 않고, 센서 토픽 구독자 수가 늘지 않음 |
 
-행동까지 허용 시간은 설정 파일의 `timeout_sec`·`fault_hold_sec`·`slow_fault_hold_sec`·`hz_window_sec` 에서 계산합니다. 실패하면 타임라인과 로그 폴더를 남기고 종료 코드 1 을 냅니다.
+행동까지 허용 시간은 설정 파일의 `fault_hold_sec`·`slow_fault_hold_sec`·`diag_timeout_sec` 에서 계산합니다. 실패하면 타임라인과 로그 폴더를 남기고 종료 코드 1 을 냅니다.
 
 ### 로스백으로 "diagnostics 만 봐도 잡혔을까" 확인
 
-`scripts/bag_diag_check.py` 는 백 안의 센서 토픽 끊김과 `/diagnostics` 보고를 시간순으로 대조합니다. 와치독이 무거운 센서 토픽을 구독하지 않고 드라이버의 `/diagnostics` 만 봐도 같은 고장을 잡았을지 판정할 때 씁니다. 차량 PC(ROS 2 Humble) 에서 실행합니다.
+`scripts/bag_diag_check.py` 는 백 안의 센서 토픽 끊김과 `/diagnostics` 보고를 시간순으로 대조합니다. 어떤 드라이버가 diag 를 내는지, 그 diag 가 실제 끊김을 몇 초 만에 잡는지 보고 `diag_names` 를 채울지 정할 때 씁니다. bag1512 에서는 CAN 관련 이름만 있고 라이다·GPS 는 없었습니다. 차량 PC(ROS 2 Humble) 에서 실행합니다.
 
 ```bash
 python3 scripts/bag_diag_check.py <백_폴더> \
@@ -722,30 +727,22 @@ python3 scripts/bag_diag_check.py <백_폴더> \
 **검증됨**
 - `test/test_health.cpp` 전부 통과 (colcon test, Ubuntu / ROS 2 Humble)
 - ROS 2 Humble 에서 `colcon build` 통과 (rmw_cyclonedds_cpp)
-- `config/ipc.yaml` 로 노드 기동, 모의 발행자로 `/diagnostics` 발행 확인. 실제 `autoware_vehicle_msgs/GearReport` 메시지(report=22)에서 게이트가 `allowed value=22` 로 읽힘
-- 라이다 4대가 `lidar.service` 한 복구 단위로 묶이고, 라이다 유닛 + GPS 유닛 동시 고장이 `BLOCKED_COMMON_CAUSE` 로 판정됨
-- 실차 rosbag(bag1512, 2026-09-17 주행 264초) 재생 시험 (dry_run):
-  - 전체 재생 60초: 5개 센서 모두 유예 10초 뒤 `HEALTHY`. 게이트는 주행 중(기어 DRIVE=2)이라 `blocked value=2` 로 올바르게 읽힘. 재생이 끝나 전부 끊기면 `BLOCKED_COMMON_CAUSE`
-  - `/front_m1p/rslidar_points` 만 빼고 재생: front_m1p 만 `NO_PUBLISHER` → 2초 뒤 `DRY_RUN_WOULD_service`. 나머지 넷은 `HEALTHY`, 공통 원인으로 잘못 막히지 않음
-  - 원시 로그 실측: 라이다 4대 10.03 Hz(최대 간격 100 ms, 크기 고정), GPS 20.05 Hz(128 B 고정), 타임스탬프 전부 단조 증가. 이 값으로 `ipc.yaml` 의 `min_hz`, `min_bytes` 를 정함
-
-- systemd 실제 동작 (이 PC 의 user systemd 에 시험용 유닛을 올려 확인):
-  - 와치독을 `Type=notify`, `WatchdogSec=5` 유닛으로 기동. READY/WATCHDOG 신호가 systemd 에 닿아 `WatchdogTimestamp` 가 0.2초마다 전진
-  - 라이다 중계 유닛의 데이터를 멈추자 3초 뒤 와치독이 실제 `systemctl --user restart` 를 호출. 유닛 PID 가 바뀌고 0.4초 만에 완료, 유예 10초 뒤 4대 모두 `recovered` (고장 시작 후 12.6초)
-  - 와치독 프로세스를 SIGSTOP 으로 얼리자 systemd 가 WatchdogSec 으로 죽이고 자동 재시작
-  - **발견한 버그**: 유닛에 `exec ros2 run ...` 을 쓰면 ros2 CLI 가 메인 PID 가 되어 `NotifyAccess=main` 이 신호를 거부하고 기동 타임아웃 → 무한 재시작. `systemd/sensor-watchdog.service` 를 바이너리 직접 exec 으로 고쳤다
+- 실차 rosbag(bag1512, 2026-09-17 주행 264초, 라이다 4대 + GPS) 으로 `test/bag_fault_test.py` 13개 시나리오 전부 통과. 핵심 수치:
+  - 발행자 소멸 → 2.5초 뒤 행동. 노드 소멸 → 2.5초. diag ERROR → 5초대. diag 끊김 → 5초대
+  - 와치독 유무 수신 Hz: 라이다 4대 10.00 → 10.00, GPS 19.99 → 19.99. 센서 토픽 구독자 수 변화 없음
+  - 재시작 후 중복 발행자 → 와치독이 띄운 유닛만 stop 1회 → HEALTHY. 남이 띄운 중복은 호출 0회
+- 라이다 4대가 `lidar.service` 한 복구 단위로 묶이고, 4대 동시 소멸 시 재시작 1회
+- systemd 실제 동작 (이 PC 의 user systemd 에 시험용 유닛을 올려 확인): `Type=notify`, `WatchdogSec=5` 로 기동·생존 신호·강제 재시작 확인. 유닛 재시작 호출이 0.4초 만에 완료되고 유예 뒤 복구. `exec ros2 run ...` 을 쓰면 `NotifyAccess=main` 이 신호를 거부하는 버그를 찾아 바이너리 직접 exec 으로 고쳤다
 
 **검증 안 됨**
-- 실제 rslidar / GPS 드라이버 유닛의 종료·기동 시간 (`ros2 launch` 가 SIGINT 로 자식까지 10초 안에 정리되는지, 드라이버가 유예 10초 안에 토픽을 다시 내는지)
+- 실제 rslidar / GPS 드라이버 유닛의 종료·기동 시간 (`ros2 launch` 가 SIGINT 로 자식까지 10초 안에 정리되는지, 드라이버가 유예 10초 안에 발행자를 다시 내는지)
+- 드라이버가 SIGKILL 로 죽었을 때 DDS 가 발행자 소멸을 알아채기까지의 시간 (CycloneDDS 기본 lease 에 따라 수 초~수십 초)
 - 실제 센서, 실차. 재시작 활성화 전에 [실제 재시작을 켜기 전 절차](#실제-재시작을-켜기-전-절차) 를 반드시 거칠 것
 - 카메라 토픽 (bag 에 없음)
 
 **설계상 검출하지 않는 것**
-- 메시지는 정상이나 내용이 쓸모없는 경우 (역광으로 날아간 영상, 눈 덮인 라이다, 멀티패스 GPS). 원시 로그에서 사례가 확인되면 그때 추가합니다
+- 발행자는 살아 있는데 데이터만 멈춤·느려짐·내용 이상 (드라이버가 `/diagnostics` 를 내지 않는 한). 센서 토픽을 구독하지 않기로 한 대가입니다. `stall_blind` 테스트가 이 한계를 고정합니다
 - 가상 환경(시뮬레이션) 시각. `use_sim_time` 은 지원하지 않습니다
-
-**지원 타입**
-- 첫 필드가 `std_msgs/Header` 인 모든 메시지. sensor_msgs 의 PointCloud2, Image, CompressedImage, NavSatFix, Imu 등
 
 ---
 

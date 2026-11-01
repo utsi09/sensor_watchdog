@@ -1,18 +1,23 @@
-# IPC 쪽 설정. 실차 rosbag(bag1512, 264초) 메타데이터 기준으로 토픽·타입·QoS·주기를 맞췼다.
+# IPC 쪽 설정. 실차 rosbag(bag1512, 264초) 기준으로 토픽·유닛을 맞췄다.
 #
-#   센서 토픽                      타입                          실측 주기  최대 간격  크기(고정)   발행 QoS
-#   /front_m1p/rslidar_points     sensor_msgs/msg/PointCloud2    10.03 Hz   100 ms   1,260,156 B  reliable, volatile, depth 100
-#   /rear_m1p/rslidar_points      sensor_msgs/msg/PointCloud2    10.03 Hz   100 ms   1,260,156 B  reliable, volatile, depth 100
-#   /left_bp/rslidar_points       sensor_msgs/msg/PointCloud2    10.03 Hz   100 ms     921,752 B  reliable, volatile, depth 100
-#   /right_bp/rslidar_points      sensor_msgs/msg/PointCloud2    10.03 Hz   100 ms     921,756 B  reliable, volatile, depth 100
-#   /fix                          sensor_msgs/msg/NavSatFix      20.05 Hz   100 ms         128 B  reliable, volatile, depth 10
-#   /vehicle/status/gear_status   autoware_vehicle_msgs/msg/GearReport  50 Hz                     reliable, volatile, depth 10  ← 게이트
-#   (주기·간격·크기는 이 bag 을 와치독 원시 로그로 60초 재생해 실측. 타임스탬프는 모두 단조 증가, 간격 100 ms)
+# 와치독은 센서 토픽을 구독하지 않는다. 실차에서 구독자가 하나 더 붙으면 라이다 발행 주기가
+# 떨어지는 현상이 있어서, 감시 근거를 데이터 경로 바깥의 정보로만 제한한다:
+#   1) 토픽에 발행자가 있는가        count_publishers(topic)  ← DDS 디스커버리 정보. 구독 없음
+#   2) 드라이버 노드가 그래프에 있는가  get_node_names()         ← node_name 을 채운 센서만
+#   3) 드라이버가 /diagnostics 를 내면 그 보고가 정상인가          ← diag_names 를 채운 센서만
+# 와치독이 구독하는 것은 /diagnostics 하나뿐이다 (gate_topic 을 켜면 기어 상태 토픽 하나 추가).
 #
-#   카메라 토픽은 이 bag 에 없다. Orin 에서 CompressedImage 를 내는 토픽 이름을 확인한 뒤
-#   아래 camera 블록의 topic 을 채우고 sensors 목록에 "camera" 를 추가한다.
+# 한계: 발행자가 살아 있는데 데이터만 멈추는 고장은 드라이버가 /diagnostics 를 내지 않으면 못 잡는다.
+# bag1512 의 /diagnostics 에는 CAN 관련 이름만 있고 rslidar·GPS 드라이버 보고는 없다.
+# 그래서 아래 라이다·GPS 는 그래프(1, 2)만 본다. 드라이버에 diagnostic_updater 를 붙이면 diag_names 를 채운다.
 #
-# 라이다·GPS 는 로컬 systemd 유닛으로, 카메라는 SSH 로 Orin 의 systemd 를 호출해 재시작한다.
+#   센서 토픽                      타입(참고)                     실측 주기   복구 유닛
+#   /front_m1p/rslidar_points     sensor_msgs/msg/PointCloud2    10.03 Hz   lidar.service
+#   /rear_m1p/rslidar_points      sensor_msgs/msg/PointCloud2    10.03 Hz   lidar.service
+#   /left_bp/rslidar_points       sensor_msgs/msg/PointCloud2    10.03 Hz   lidar.service
+#   /right_bp/rslidar_points      sensor_msgs/msg/PointCloud2    10.03 Hz   lidar.service
+#   /fix                          sensor_msgs/msg/NavSatFix      20.05 Hz   rtk-gps.service
+#
 # /**: 는 노드 이름이 뭐든 적용된다는 뜻. (-r __node:=watchdog_ipc 로 띄워도 됨)
 
 /**:
@@ -23,19 +28,17 @@
     # README의 "활성화 기준"을 만족하기 전까지 false로 바꾸지 않는다.
     dry_run: true
 
-    # 원시 관측 CSV + events.csv 저장 위치. "" 면 끔.
-    raw_log_dir: "~/.local/state/sensor_watchdog"
-    # 파일당 크기 상한(MB). 넘으면 <파일>.1 백업 하나만 남기고 새로 시작한다. 0 이면 무제한.
-    # 센서 5개 원시 로그는 실측 약 240 MB/일. 100 이면 디스크 최대 (5+1)×2×100 = 1.2 GB.
-    raw_log_max_mb: 100.0
+    # events.csv(상태 변화·행동·복구 시간) 저장 위치. "" 면 끔.
+    log_dir: "~/.local/state/sensor_watchdog"
+    # events.csv 크기 상한(MB). 넘으면 <파일>.1 백업 하나만 남기고 새로 시작한다. 0 이면 무제한.
+    log_max_mb: 20.0
 
     # ---------------------------------------------------------------- 안전 게이트
-    # 기어가 P(파킹)일 때만 복구 행동을 허용한다. 차량 코드 수정 없이 기존 토픽을 그대로 읽는다.
-    #   autoware_vehicle_msgs/msg/GearReport = { builtin_interfaces/Time stamp; uint8 report }
-    #   std_msgs/Header 가 아니라 stamp 만 앞에 있으므로 gate_prefix 는 "stamp".
-    #   report 상수: NEUTRAL=1, DRIVE=2, REVERSE=20, PARK=22, LOW=23
-    # 테스트 중이라 게이트를 꺼 둔다(""): 기어가 D단이어도 바로 껐다 켠다.
+    # 기어가 P(파킹)일 때만 복구 행동을 허용한다. 이걸 켜면 기어 상태 토픽(수십 바이트, 50 Hz)을
+    # 하나 구독한다. 센서 토픽이 아니라 발행 주기에 영향은 없지만, 테스트 중이라 꺼 둔다("").
     # 상용화 전에 켜려면 "" 를 /vehicle/status/gear_status 로 바꾸면 된다. 아래 설정은 그대로 둔다.
+    #   autoware_vehicle_msgs/msg/GearReport = { builtin_interfaces/Time stamp; uint8 report }
+    #   report 상수: NEUTRAL=1, DRIVE=2, REVERSE=20, PARK=22, LOW=23
     gate_topic: ""
     gate_type: autoware_vehicle_msgs/msg/GearReport
     gate_prefix: stamp          # none | stamp | header
@@ -66,16 +69,18 @@
     heartbeat_port: 5005
 
     # ---------------------------------------------------------------- 판정 정책
-    # 시작/행동 직후 판정 유예. rslidar 드라이버가 뜨고 첫 클라우드가 나오기까지 수 초 걸린다.
+    # 시작/행동 직후 판정 유예. rslidar 드라이버가 뜨고 발행자가 그래프에 나타나기까지 수 초 걸린다.
     startup_grace_sec: 10.0
-    # 고장 표시(timeout_sec 경과)가 이만큼 더 지속돼야 행동한다.
-    # 라이다 기준: 1초 끊기면 고장 표시 → 2초 더 지속(총 3초 무수신) → 재시작
+    # 고장이 이만큼 지속돼야 행동한다 (DDS 디스커버리가 잠깐 흔들리는 것을 거른다).
     fault_hold_sec: 2.0
 
-    # 확실한 끊김. fault_hold_sec 뒤 재시작.
-    act_on_faults: ["RX_TIMEOUT", "NO_PUBLISHER", "NODE_NOT_VISIBLE"]
-    # 애매한 고장(주기 저하, 타임스탬프 정지·역행). 이만큼 계속돼야 재시작. 잠깐 튀는 건 무시.
-    act_on_faults_slow: ["LOW_RX_HZ", "STAMP_NOT_ADVANCING", "STAMP_INVALID_OR_BACKWARD"]
+    # 확실한 고장. fault_hold_sec 뒤 재시작.
+    #   NODE_NOT_VISIBLE : node_name 이 그래프에서 사라짐 (프로세스 죽음)
+    #   NO_PUBLISHER     : 토픽 발행자 0 (프로세스 죽음 또는 아직 안 뜸)
+    #   DIAG_STALE       : 드라이버 diag 보고가 diag_timeout_sec 넘게 끊김 (프로세스는 있는데 멈춤)
+    act_on_faults: ["NODE_NOT_VISIBLE", "NO_PUBLISHER", "DIAG_STALE"]
+    # 드라이버가 스스로 ERROR 라고 보고하는 경우. 주기 검사는 잠깐 튈 수 있어 더 오래 참는다.
+    act_on_faults_slow: ["DIAG_ERROR"]
     slow_fault_hold_sec: 5.0
     # 행동 완료 후 다음 행동까지 최소 간격
     cooldown_sec: 30.0
@@ -99,137 +104,72 @@
     # 같은 틱에 중복으로 재시작하지 않는다.
     # 라이다마다 런치가 따로면 unit 을 lidar-front-m1p.service 처럼 나눠 적으면 된다.
     #
-    # 구독 QoS 는 best_effort, depth 1. 발행자는 reliable 이지만 best_effort 구독과 호환되고,
-    # 와치독은 헤더만 읽기 때문에 큐를 쌓을 이유가 없다 (PointCloud2 는 메시지당 수백 KB~수 MB).
+    # node_name: IPC 에서 라이다를 켠 뒤 `ros2 node list` 로 확인해 채운다 (예: /front_m1p/rslidar_sdk_node).
+    #            채우면 "노드가 사라짐"을 발행자 수와 별개로 잡는다. 비우면 발행자 수만 본다.
+    # diag_names: 드라이버가 /diagnostics 를 내면 그 status 이름 조각을 적는다. rslidar_sdk 는 안 냄 → 비움.
     front_m1p:
       topic: /front_m1p/rslidar_points
-      type: sensor_msgs/msg/PointCloud2
-      node_name: ""                 # 예: /front_m1p/rslidar_sdk_node  (ros2 node list 로 확인 후 설정하면 노드 사라짐도 감지)
+      node_name: ""
       lifecycle_node: ""
       unit: lidar.service
       # power_cmd: ["/home/USER/.local/bin/power_cycle.sh"]   # PoE 포트 제어 수단이 있을 때만. 빈 배열([])은 쓰지 말고 줄을 지운다.
-
-      timeout_sec: 1.0              # 10 Hz → 정상 간격 0.1초. 10배 여유
-      stamp_timeout_sec: 1.0
-      min_hz: 5.0                   # 정상 10 Hz 의 절반 아래면 LOW_RX_HZ
-      hz_window_sec: 5.0
-      min_bytes: 600000             # 실측 1,260,156 B 고정. 절반 아래면 잘린/빈 클라우드로 본다 (TOO_SMALL)
-      check_stamp_progress: true
-      check_stamp_age: false        # 라이다 시각이 IPC 와 PTP 동기된 뒤 true
-      max_age_sec: 0.5
-      qos:
-        reliability: best_effort
-        durability: volatile
-        depth: 1
+      # diag_names: ["..."]         # 드라이버가 diag 를 내면 채운다. 빈 리스트 [] 는 쓰지 말고 줄을 지운다
+      diag_timeout_sec: 3.0
+      diag_error_level: 2          # 1: WARN 부터 고장 / 2: ERROR 부터 / 3: STALE 만
 
     rear_m1p:
       topic: /rear_m1p/rslidar_points
-      type: sensor_msgs/msg/PointCloud2
       node_name: ""
       lifecycle_node: ""
       unit: lidar.service
-
-      timeout_sec: 1.0
-      stamp_timeout_sec: 1.0
-      min_hz: 5.0
-      hz_window_sec: 5.0
-      min_bytes: 600000             # 실측 1,260,156 B 고정
-      check_stamp_progress: true
-      check_stamp_age: false
-      max_age_sec: 0.5
-      qos:
-        reliability: best_effort
-        durability: volatile
-        depth: 1
+      # diag_names: ["..."]         # 드라이버가 diag 를 내면 채운다. 빈 리스트 [] 는 쓰지 말고 줄을 지운다
+      diag_timeout_sec: 3.0
+      diag_error_level: 2
 
     left_bp:
       topic: /left_bp/rslidar_points
-      type: sensor_msgs/msg/PointCloud2
       node_name: ""
       lifecycle_node: ""
       unit: lidar.service
-
-      timeout_sec: 1.0
-      stamp_timeout_sec: 1.0
-      min_hz: 5.0
-      hz_window_sec: 5.0
-      min_bytes: 450000             # 실측 921,752 B 고정
-      check_stamp_progress: true
-      check_stamp_age: false
-      max_age_sec: 0.5
-      qos:
-        reliability: best_effort
-        durability: volatile
-        depth: 1
+      # diag_names: ["..."]         # 드라이버가 diag 를 내면 채운다. 빈 리스트 [] 는 쓰지 말고 줄을 지운다
+      diag_timeout_sec: 3.0
+      diag_error_level: 2
 
     right_bp:
       topic: /right_bp/rslidar_points
-      type: sensor_msgs/msg/PointCloud2
       node_name: ""
       lifecycle_node: ""
       unit: lidar.service
+      # diag_names: ["..."]         # 드라이버가 diag 를 내면 채운다. 빈 리스트 [] 는 쓰지 말고 줄을 지운다
+      diag_timeout_sec: 3.0
+      diag_error_level: 2
 
-      timeout_sec: 1.0
-      stamp_timeout_sec: 1.0
-      min_hz: 5.0
-      hz_window_sec: 5.0
-      min_bytes: 450000             # 실측 921,756 B 고정
-      check_stamp_progress: true
-      check_stamp_age: false
-      max_age_sec: 0.5
-      qos:
-        reliability: best_effort
-        durability: volatile
-        depth: 1
-
-    # ---------------------------------------------------------------- RTK GPS
-    # /fix 는 20 Hz. 같은 드라이버가 /heading, /vel, /time_reference 도 20 Hz 로 낸다.
-    # /fix 하나만 보면 드라이버 생존은 충분히 알 수 있다.
+    # ---------------------------------------------------------------- GPS (RTK)
+    # /fix 는 20 Hz. 같은 드라이버가 /heading, /vel, /time_reference 도 낸다.
+    # 발행자 유무는 /fix 하나로 충분하다. GPS 드라이버가 diagnostic_updater 를 쓰면
+    # (ublox, septentrio 등은 보통 냄) diag_names 에 그 이름 조각을 적어 "수신 멈춤"까지 잡는다.
+    #   확인: ros2 topic echo /diagnostics --field status | grep name
     gps:
       topic: /fix
-      type: sensor_msgs/msg/NavSatFix
       node_name: ""
       lifecycle_node: ""
       unit: rtk-gps.service
-
-      timeout_sec: 1.0              # 20 Hz → 정상 간격 0.05초
-      stamp_timeout_sec: 1.0
-      min_hz: 10.0                  # 정상 20 Hz 의 절반
-      hz_window_sec: 5.0
-      min_bytes: 100                # 실측 128 B 고정
-      check_stamp_progress: true
-      check_stamp_age: false        # GPS 드라이버가 GPS 시각으로 stamp 를 찍을 수 있어 끔
-      max_age_sec: 1.0
-      qos:
-        reliability: best_effort
-        durability: volatile
-        depth: 5
+      # diag_names: ["gps"]        # 드라이버가 diag 를 내면 이름 조각을 적는다. (빈 리스트 [] 는 쓰지 말고 줄을 지운다)
+      diag_timeout_sec: 3.0
+      diag_error_level: 2
 
     # ---------------------------------------------------------------- 카메라 (Orin, 미확정)
-    # bag 에 카메라 토픽이 없어 sensors 에서 빠져 있다. 아래 세 가지를 Orin 에서 확인한 뒤 켠다:
-    #   ros2 topic list -t | grep -i image      → topic, type (CompressedImage 또는 Image)
-    #   ros2 topic info /토픽 --verbose          → Reliability (best_effort 가 흔함)
-    #   ros2 topic hz /토픽                      → 주기 (보통 10~30 Hz) → min_hz 는 그 절반
-    # CompressedImage, Image 모두 첫 필드가 std_msgs/Header 라 코드 수정 없이 type 만 바꾸면 된다.
+    # bag 에 카메라 토픽이 없어 sensors 에서 빠져 있다. Orin 에서 확인한 뒤 켠다:
+    #   ros2 topic list | grep -i image      → topic
+    #   ros2 node list                        → node_name (Orin 이 같은 ROS_DOMAIN_ID 여야 보인다)
     camera:
       topic: /CHANGE_ME_CAMERA_TOPIC
-      type: sensor_msgs/msg/CompressedImage
       node_name: ""
       lifecycle_node: ""
       unit: cam.service
       # Orin 의 systemd 를 SSH 로 호출한다. "orin" 은 ~/.ssh/config 의 Host 별칭.
       # README "원격 장비를 SSH 로 재시작하기" 의 키 제한 설정을 반드시 할 것.
       systemctl_cmd: ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "orin", "systemctl", "--user"]
-
-      timeout_sec: 1.0
-      stamp_timeout_sec: 1.0
-      min_hz: 5.0
-      hz_window_sec: 5.0
-      min_bytes: 1                  # JPEG 는 크기가 변해서 원시 로그 분포를 본 뒤 하한을 정한다
-      check_stamp_progress: true
-      check_stamp_age: false
-      max_age_sec: 0.5
-      qos:
-        reliability: best_effort
-        durability: volatile
-        depth: 1
+      # diag_names: ["..."]         # 드라이버가 diag 를 내면 채운다. 빈 리스트 [] 는 쓰지 말고 줄을 지운다
+      diag_timeout_sec: 3.0
+      diag_error_level: 2

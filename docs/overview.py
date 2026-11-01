@@ -32,7 +32,7 @@ def arrow(p0, p1, color="#374151", lw=2.2, label=None, lx=0, ly=0, fs=10.5, ls="
         ax.text((p0[0]+p1[0])/2 + lx, (p0[1]+p1[1])/2 + ly, label, fontsize=fs, ha="center", va="center",
                 color=color, fontweight="bold", bbox=dict(fc="white", ec="none", pad=1.5))
 
-ax.text(65, 83.5, "sensor_watchdog 한눈에 보기 — 센서가 멈추면 알아채고, 안전할 때만 껐다 켠다", ha="center", va="center",
+ax.text(65, 83.5, "sensor_watchdog 한눈에 보기 — 센서 토픽은 구독하지 않고, 드라이버가 죽으면 껐다 켠다", ha="center", va="center",
         fontsize=17, fontweight="bold")
 
 # ---------- 1. 센서 ----------
@@ -50,12 +50,12 @@ box(56, 18, 46, 60, C_WD, E_WD)
 ax.text(79, 76.2, "② 와치독  (sensor_watchdog 노드 1개, IPC에서 실행)", ha="center", va="top", fontsize=13, fontweight="bold", color=E_WD)
 
 steps = [
-    ("지켜본다  (0.2초마다)",
-     "데이터가 오나?  너무 드물게 오나?\n데이터 안의 시계(stamp)가 멈췄나?  크기가 너무 작나?\n* 내용은 안 풀어봄 — 머리글만 읽어서 CPU 거의 안 씀"),
+    ("지켜본다  (0.2초마다, 구독 없이)",
+     "토픽에 발행자가 있나?  둘 이상 떠 있나(중복)?\n드라이버 노드가 목록에 있나?  드라이버 diag 가 정상인가?\n* 센서 토픽을 구독하지 않아 발행 Hz 에 영향 0 (실측 10.00 → 10.00)"),
     ("참는다",
-     "잠깐 끊긴 건 무시.  끊김 2초 / 느림 5초 이상\n계속돼야 \"고장\"으로 확정"),
+     "디스커버리가 잠깐 흔들린 건 무시.  사라짐 2초 /\ndiag ERROR 5초 / 중복 5초 이상 계속돼야 확정"),
     ("안전한지 본다",
-     "차가 P단인가?  ← 테스트 중이라 꺼 둠 (gate_topic: \"\")\n한 유닛의 센서가 한꺼번에 죽었나?  → 한 번만 재시작\n방금 재시작한 센서인가?  → 돌아올 때까지 기다림"),
+     "차가 P단인가?  ← 테스트 중이라 꺼 둠 (gate_topic: \"\")\n한 유닛의 센서가 한꺼번에 죽었나?  → 한 번만 재시작\n중복이면 내가 띄운 유닛만 끔. 남이 띄운 건 보고만"),
     ("복구 사다리  (한 칸씩 올라감)",
      "1) 노드 lifecycle 재시작  →  2) 프로세스 껐다 켬  →  3) 전원\n몇 번 해도 안 되면 포기하고 \"EXHAUSTED\" 로 보고"),
 ]
@@ -77,10 +77,10 @@ ax.text(52.5, 5.6, "센서 드라이버를 켜고 · 죽으면 다시 켜고 · 
 box(106, 48, 22, 30, C_OUT, E_OUT)
 ax.text(117, 76.2, "④ 밖으로 알림", ha="center", va="top", fontsize=13, fontweight="bold", color=E_OUT)
 box(108, 62, 18, 11, "white", E_OUT, title="/diagnostics", body="센서마다\n정상 / 고장 / 복구중\nrqt 에서 바로 보임", tfs=11.5, bfs=9)
-box(108, 50, 18, 10.5, "white", E_OUT, title="CSV 로그", body="메시지마다 한 줄 +\n언제 왜 재시작했는지", tfs=11.5, bfs=9)
+box(108, 50, 18, 10.5, "white", E_OUT, title="events.csv", body="상태가 바뀔 때마다 한 줄\n언제 왜 재시작했는지", tfs=11.5, bfs=9)
 
 # ---------- 화살표 ----------
-arrow((51, 68), (56, 68), color=E_SENSOR, lw=2.6, label="토픽 (데이터가 계속 흘러옴)", lx=13, ly=3.5, fs=10)
+arrow((51, 68), (56, 68), color=E_SENSOR, lw=2.6, ls=":", label="데이터는 안 받음. 발행자 수·노드 목록만 물음", lx=13, ly=3.5, fs=9.5)
 arrow((23, 48.8), (59, 42.5), color="#6b7280", lw=1.8, label="P단 확인 (꺼 둠)", lx=-6, ly=1.5, fs=9.5, conn="arc3,rad=0.15")
 arrow((99, 40), (108, 55.5), color=E_OUT, lw=2.2, conn="arc3,rad=-0.25")
 arrow((99, 66), (108, 67.5), color=E_OUT, lw=2.2, label="상태 보고", ly=2, fs=9.5)
@@ -96,14 +96,14 @@ ax.text(103.5, 14.5, "와치독: \"나 살아있어\" (0.2초마다)\n5초간 �
 box(106, 20, 22, 25, C_NOTE, "#9ca3af")
 ax.text(117, 43.2, "예: 앞 라이다가 멈추면", ha="center", va="top", fontsize=12, fontweight="bold")
 ax.text(108, 38.5,
-        "0초   데이터 끊김\n"
+        "0초   드라이버 죽음 (발행자 사라짐)\n"
         "2초   \"고장\" 확정\n"
         "        (P단 확인은 꺼 둠)\n"
         "        다른 라이다 3대는 멀쩡\n"
         "        → 앞 라이다 문제로 판단\n"
         "3초   systemd 에 재시작 요청\n"
         "        (4대가 한 런치면 4대 같이)\n"
-        "~15초 데이터 다시 들어옴\n"
+        "~13초 발행자 다시 나타남\n"
         "        → 정상 복귀, 로그에 기록",
         ha="left", va="top", fontsize=9, linespacing=1.45)
 

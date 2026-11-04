@@ -13,12 +13,19 @@ src/sensor_watchdog/scripts/watchdog_on.sh my.yaml    # 다른 설정 파일로 
 src/sensor_watchdog/scripts/watchdog_off.sh           # 끄기 (센서는 그대로 둠)
 src/sensor_watchdog/scripts/watchdog_off.sh --all     # 끄기 + 와치독이 재시작해서 띄운 센서 유닛까지 끄기
 
-# 3) 보기
+# 3) 센서 유닛 직접 켜기 / 끄기 (와치독과 별개. 센서를 끌 땐 와치독을 먼저 끌 것)
+systemctl --user start lidar rtk-gps                   # 센서 켜기
+systemctl --user restart lidar                         # 센서 껐다 켜기
+systemctl --user stop lidar rtk-gps                    # 센서 끄기 (와치독이 켜져 있으면 2초 뒤 다시 켜짐 → watchdog_off.sh 먼저)
+systemctl --user status lidar                          # 살아 있나
+journalctl --user -u lidar -f                          # 센서 로그
+
+# 4) 보기
 ros2 topic echo /diagnostics                           # 센서마다 state / faults / publishers
 tail -f ~/.local/state/sensor_watchdog/watchdog.log    # 직접 띄웠을 때 로그
 tail -f ~/.local/state/sensor_watchdog/events.csv      # 상태 변화·재시작 기록
 
-# 4) 테스트
+# 5) 테스트
 python3 src/sensor_watchdog/test/bag_fault_test.py <로스백_폴더>   # 실차 백으로 13개 시나리오
 ```
 

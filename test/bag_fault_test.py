@@ -125,7 +125,8 @@ class Harness:
         cmd = [binpath, "--ros-args", "-r", f"__node:={self.node_name}",
                "--params-file", self.args.config,
                "-p", f"log_dir:={self.tmp}", "-p", 'heartbeat_host:=""',
-               "-p", 'gate_topic:=""']        # 게이트는 백 재생에선 항상 허용 (빈 문자열은 "" 로 줘야 파싱됨)
+               "-p", 'gate_topic:=""',        # 게이트는 백 재생에선 항상 허용 (빈 문자열은 "" 로 줘야 파싱됨)
+               "-p", f"startup_grace_sec:={self.args.grace}"]   # 실차 설정(30초)과 무관하게 테스트는 짧은 유예로
         if self.mode == "node_gone":
             cmd += ["-p", f"{self.fault_sensor}.node_name:=/{RELAY_NODE}"]
         if self.scenario in self.DIAG_SCENARIOS:
@@ -475,7 +476,7 @@ class Harness:
 
     def judge(self):
         p, at = self.p, self.args.at
-        grace = float(p.get("startup_grace_sec", 10.0))
+        grace = float(self.args.grace)            # 와치독에 -p 로 덮어쓴 값
         hold = float(p.get("fault_hold_sec", 2.0))
         slow_hold = float(p.get("slow_fault_hold_sec", 5.0))
         fs = self.fault_sensor
@@ -626,7 +627,9 @@ def main():
     ap.add_argument("--config", default=os.path.join(PKG, "config", "ipc.yaml"))
     ap.add_argument("--scenario", default="all", help="all 또는 쉼표로 이어 쓴 이름: " + ",".join(ALL_SCENARIOS))
     ap.add_argument("--fault-sensor", default=None, help="고장을 넣을 센서 id (기본: sensors 첫 항목)")
-    ap.add_argument("--at", type=float, default=15.0, help="첫 메시지 기준 고장 주입 시각 [s]")
+    ap.add_argument("--at", type=float, default=15.0, help="첫 메시지 기준 고장 주입 시각 [s] (--grace 보다 커야 함)")
+    ap.add_argument("--grace", type=float, default=10.0,
+                    help="테스트용 startup_grace_sec [s]. 설정 파일 값(실차 30초) 대신 이 값으로 와치독을 띄운다")
     ap.add_argument("--duration", type=float, default=45.0, help="시나리오당 재생 시간 [s]")
     ap.add_argument("--mode", choices=["dry", "fake"], default="dry",
                     help="dry: dry_run 상태만 확인 / fake: 가짜 systemctl 로 행동까지")
@@ -637,6 +640,8 @@ def main():
     args = ap.parse_args()
     if not os.path.isdir(args.bag):
         sys.exit(f"백 폴더가 없음: {args.bag}")
+    if args.at <= args.grace + 1.0:
+        sys.exit(f"--at({args.at}) 는 --grace({args.grace}) 보다 1초 이상 커야 합니다 (유예 중엔 판정을 안 함)")
     try:
         import rclpy  # noqa: F401
     except ImportError:
@@ -655,6 +660,7 @@ def main():
     for sc in scenarios:
         cmd = [sys.executable, os.path.abspath(__file__), args.bag, "--scenario", sc,
                "--config", args.config, "--at", str(args.at), "--duration", str(args.duration),
+               "--grace", str(args.grace),
                "--mode", args.mode, "--domain", str(args.domain),
                "--hz-tolerance", str(args.hz_tolerance)]
         if args.fault_sensor:

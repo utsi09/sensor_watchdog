@@ -374,7 +374,7 @@ ssh -o BatchMode=yes orin 'whoami'           # 역시 재시작만 됨
 
 | 로그 | 뜻 | 할 일 |
 |---|---|---|
-| `[lidar] GRACE` | 시작 직후 10초 유예. 아직 판정 안 함 | 기다림 |
+| `[lidar] GRACE` | 시작·재시작 직후 유예(`startup_grace_sec`, 30초). 아직 판정 안 함 | 기다림 |
 | `[lidar] HEALTHY` | 정상 | 없음 |
 | `[lidar] HOLDING: NO_PUBLISHER` | 발행자가 사라짐. 2초 더 지켜보는 중 | 보통 디스커버리 흔들림이면 혼자 돌아옴 |
 | `[lidar] COOLDOWN: NO_PUBLISHER` | 고장인데 직전 재시작 후 30초 안 지남 | 기다림 |
@@ -471,7 +471,7 @@ lifecycle  →  service  →  power  →  EXHAUSTED
 
 같은 칸을 `attempts_per_step`(2회) 시도해도 안 되면 다음 칸. 끝까지 실패하면 `EXHAUSTED`. `healthy_reset_sec`(10분) 동안 정상이면 사다리를 처음으로 되돌립니다.
 
-각 행동 뒤에는 `startup_grace_sec`(10초) 유예 후 다시 판정하고, `cooldown_sec`(30초) 동안은 다음 행동을 하지 않습니다.
+각 행동 뒤에는 `startup_grace_sec`(30초) 유예 후 다시 판정하고, `cooldown_sec`(30초) 동안은 다음 행동을 하지 않습니다. 30초는 실차에서 `lidar.service` 재시작 뒤 라이다 4대 발행자가 돌아오기까지 23초 걸린 것을 재고 정한 값입니다. 유예가 기동 시간보다 짧으면 유예가 끝나자마자 `NO_PUBLISHER` 로 다시 잡혀 쓸데없이 ERROR 를 보고하고, 쿨다운까지 짧으면 재시작 루프가 됩니다.
 
 ### 6. 상태 발행: `/diagnostics`
 
@@ -527,7 +527,7 @@ values: fault, faults, state, publishers, node(unchecked/visible/missing/duplica
 | `systemctl_cmd` | `["systemctl", "--user"]` | 서비스 재시작 명령 앞부분. 시스템 유닛이면 `["sudo", "-n", "systemctl"]` |
 | `heartbeat_host` | `""` | MCU IPv4 주소. `""` 면 끔 |
 | `heartbeat_port` | `5005` | |
-| `startup_grace_sec` | `10.0` | 시작·행동 직후 판정 유예 |
+| `startup_grace_sec` | `30.0` | 시작·행동 직후 판정 유예. 드라이버 재시작 뒤 발행자가 돌아오는 시간보다 길어야 한다 (실차 라이다 23초 실측) |
 | `fault_hold_sec` | `2.0` | 고장이 이만큼 지속돼야 행동 |
 | `act_on_faults` | `[NODE_NOT_VISIBLE, NO_PUBLISHER, DIAG_STALE]` | 확실한 고장. `fault_hold_sec` 뒤 행동 |
 | `act_on_faults_slow` | `[DIAG_ERROR]` | 드라이버 자체 보고. `slow_fault_hold_sec` 뒤 행동 |
@@ -580,7 +580,7 @@ bag1512 재생으로 이미 실측한 값은 다음과 같습니다. 와치독�
 
 ### 2. 기본 동작을 실측한다 (각 5분, 스톱워치)
 
-1. `systemctl --user restart lidar` 후 `ros2 topic hz` 가 다시 뜨기까지 몇 초인가 → `startup_grace_sec` 근거
+1. `systemctl --user restart lidar` 후 `ros2 topic hz` 가 다시 뜨기까지 몇 초인가 → `startup_grace_sec` 근거. 2026-11-04 실차 실측: 23초 (`events.csv` 의 `recovered ... after 23.0s`). 그래서 30초
 2. 라이다 케이블을 뽑았다 꽂으면 드라이버가 혼자 살아나는가. 산다면 재시작이 필요 없는 고장이다 → `fault_hold_sec` 근거
 3. `systemctl --user stop lidar` 후 `pgrep -af <드라이버패키지>` 에 남는 프로세스가 있는가 → `KillMode` 검증
 
@@ -768,10 +768,11 @@ python3 scripts/bag_diag_check.py <백_폴더> \
   - 와치독 유무 수신 Hz: 라이다 4대 10.00 → 10.00, GPS 19.99 → 19.99. 센서 토픽 구독자 수 변화 없음
   - 재시작 후 중복 발행자 → 와치독이 띄운 유닛만 stop 1회 → HEALTHY. 남이 띄운 중복은 호출 0회
 - 라이다 4대가 `lidar.service` 한 복구 단위로 묶이고, 4대 동시 소멸 시 재시작 1회
+- 실차(2026-11-04, IPC Nuvo-8208GC): `--live` 로 `lidar.service` 를 실제 재시작해 라이다 4대가 23초 뒤 발행자를 되찾고 HEALTHY 로 복귀. 재시작 뒤 `ros2 topic hz` 10 Hz. 단, `ros2 topic hz` 의 `average rate` 는 창 전체 평균이라 재시작 공백(20초대)이 섞이면 2 Hz 처럼 보이니 새로 띄워서 볼 것
 - systemd 실제 동작 (이 PC 의 user systemd 에 시험용 유닛을 올려 확인): `Type=notify`, `WatchdogSec=5` 로 기동·생존 신호·강제 재시작 확인. 유닛 재시작 호출이 0.4초 만에 완료되고 유예 뒤 복구. `exec ros2 run ...` 을 쓰면 `NotifyAccess=main` 이 신호를 거부하는 버그를 찾아 바이너리 직접 exec 으로 고쳤다
 
 **검증 안 됨**
-- 실제 rslidar / GPS 드라이버 유닛의 종료·기동 시간 (`ros2 launch` 가 SIGINT 로 자식까지 10초 안에 정리되는지, 드라이버가 유예 10초 안에 발행자를 다시 내는지)
+- GPS 드라이버 유닛의 종료·기동 시간. 라이다는 23초로 실측됐고 유예 30초로 맞췄다
 - 드라이버가 SIGKILL 로 죽었을 때 DDS 가 발행자 소멸을 알아채기까지의 시간 (CycloneDDS 기본 lease 에 따라 수 초~수십 초)
 - 실제 센서, 실차. 재시작 활성화 전에 [실제 재시작을 켜기 전 절차](#실제-재시작을-켜기-전-절차) 를 반드시 거칠 것
 - 카메라 토픽 (bag 에 없음)

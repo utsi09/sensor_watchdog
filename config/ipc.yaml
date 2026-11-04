@@ -26,7 +26,7 @@
 
     # true: 판정과 기록만 하고 행동은 하지 않는다 (감지 전용 모드).
     # README의 "활성화 기준"을 만족하기 전까지 false로 바꾸지 않는다.
-    dry_run: true
+    dry_run: false
 
     # events.csv(상태 변화·행동·복구 시간) 저장 위치. "" 면 끔.
     log_dir: "~/.local/state/sensor_watchdog"

@@ -768,7 +768,7 @@ python3 scripts/bag_diag_check.py <백_폴더> \
   - 와치독 유무 수신 Hz: 라이다 4대 10.00 → 10.00, GPS 19.99 → 19.99. 센서 토픽 구독자 수 변화 없음
   - 재시작 후 중복 발행자 → 와치독이 띄운 유닛만 stop 1회 → HEALTHY. 남이 띄운 중복은 호출 0회
 - 라이다 4대가 `lidar.service` 한 복구 단위로 묶이고, 4대 동시 소멸 시 재시작 1회
-- 실차(2026-11-04, IPC Nuvo-8208GC): `--live` 로 `lidar.service` 를 실제 재시작해 라이다 4대가 23초 뒤 발행자를 되찾고 HEALTHY 로 복귀. 재시작 뒤 `ros2 topic hz` 10 Hz. 단, `ros2 topic hz` 의 `average rate` 는 창 전체 평균이라 재시작 공백(20초대)이 섞이면 2 Hz 처럼 보이니 새로 띄워서 볼 것
+- 실차(2026-11-04, IPC Nuvo-8208GC): `--live` 로 `lidar.service` 를 실제 재시작해 라이다 4대가 23초 뒤 발행자를 되찾고 HEALTHY 로 복귀. 재시작 뒤 실제 수신 주기는 아직 확인 중 (같은 날 `ros2 topic hz` 누적 평균이 2 Hz 대, 20초대 공백 여러 번. 와치독이 아무 행동도 안 하는 동안 생긴 공백이라 와치독 탓은 아니며 유닛 환경·드라이버·네트워크 중 어디인지 가리는 중). `ros2 topic hz` 는 `-w 20` 으로 새로 띄워서 볼 것
 - systemd 실제 동작 (이 PC 의 user systemd 에 시험용 유닛을 올려 확인): `Type=notify`, `WatchdogSec=5` 로 기동·생존 신호·강제 재시작 확인. 유닛 재시작 호출이 0.4초 만에 완료되고 유예 뒤 복구. `exec ros2 run ...` 을 쓰면 `NotifyAccess=main` 이 신호를 거부하는 버그를 찾아 바이너리 직접 exec 으로 고쳤다
 
 **검증 안 됨**

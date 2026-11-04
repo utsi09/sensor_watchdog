@@ -26,6 +26,7 @@
 #include "sensor_watchdog/cdr_header.hpp"
 #include "sensor_watchdog/health.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -387,6 +388,7 @@ public:
             events_path_ = log_dir_ + "/events.csv";
             if (!open_csv(events_, events_path_, EVENTS_HEADER))
                 throw std::runtime_error("cannot open " + events_path_);
+            started_units_path_ = log_dir_ + "/started_units";
         }
 
         heartbeat_ = std::make_unique<UdpHeartbeat>(hb_host, hb_port);
@@ -449,6 +451,7 @@ public:
             log_dir_.empty() ? "off" : log_dir_.c_str(),
             any_diag ? "/diagnostics" : "(none)",
             gate_topic_.empty() ? "" : " + gate");
+        write_started_units();   // 새 인스턴스: 메모리(모두 false)와 파일을 맞춘다
     }
 
 private:
@@ -660,6 +663,42 @@ private:
         event(s, "action_start", to_string(a.step), -1, a.describe);
     }
 
+    // 와치독이 띄운 유닛 목록을 <log_dir>/started_units 에 적는다. 한 줄에 "유닛<TAB>systemctl 명령 앞부분".
+    // watchdog_off.sh --all 이 이 파일을 읽어 와치독이 띄운 유닛만 끈다. 비면 파일을 지운다.
+    // 메모리의 started_by_us 와 항상 같게 유지한다 (새 인스턴스가 뜨면 비운다).
+    void write_started_units()
+    {
+        if (started_units_path_.empty())
+            return;
+        std::vector<std::string> lines;
+        for (const auto &sp : sensors_) {
+            const Sensor &s = *sp;
+            if (!s.started_by_us || s.unit.empty())
+                continue;
+            const auto &prefix = s.systemctl_cmd.empty() ? systemctl_cmd_ : s.systemctl_cmd;
+            std::string line = s.unit + "\t";
+            for (std::size_t i = 0; i < prefix.size(); ++i)
+                line += (i ? " " : "") + prefix[i];
+            if (std::find(lines.begin(), lines.end(), line) == lines.end())
+                lines.push_back(line);
+        }
+        if (lines.empty()) {
+            std::remove(started_units_path_.c_str());
+            return;
+        }
+        const std::string tmp = started_units_path_ + ".tmp";
+        {
+            std::ofstream f(tmp, std::ios::trunc);
+            if (!f) {
+                RCLCPP_WARN(get_logger(), "cannot write %s", tmp.c_str());
+                return;
+            }
+            for (const auto &l : lines)
+                f << l << '\n';
+        }
+        std::rename(tmp.c_str(), started_units_path_.c_str());
+    }
+
     // 와치독이 띄운 유닛이 중복의 한쪽일 때 그 유닛만 끈다. systemd 는 그 유닛이 띄운 프로세스만
     // 알고 있으므로(cgroup) 사람이 터미널에서 따로 띄운 쪽은 건드리지 않는다.
     void start_duplicate_stop(Sensor &s, double t)
@@ -680,6 +719,7 @@ private:
         s.started_by_us = false;
         for (Sensor *o : siblings(s))
             o->started_by_us = false;
+        write_started_units();
 
         RCLCPP_ERROR(get_logger(), "[%s] DUPLICATE: %zu publishers on %s; stopping the unit we started (%s)",
             s.id.c_str(), s.graph.publishers, s.topic.c_str(), s.unit.c_str());
@@ -773,6 +813,7 @@ private:
                         s.started_by_us = true;
                         for (Sensor *o : siblings(s))
                             o->started_by_us = true;
+                        write_started_units();
                     }
                 }
                 if (done_step != Step::LIFECYCLE)
@@ -1013,6 +1054,7 @@ private:
     std::string log_dir_;
     uint64_t log_max_bytes_ = 0;
     std::string events_path_;
+    std::string started_units_path_;   // 와치독이 띄운 유닛 목록 (watchdog_off.sh --all 이 읽음)
     std::string gate_topic_;
     std::string gate_type_;
     Prefix gate_prefix_ = Prefix::NONE;

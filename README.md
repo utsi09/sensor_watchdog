@@ -10,7 +10,8 @@ cd ~/watchdog_ws && colcon build --packages-select sensor_watchdog && source ins
 src/sensor_watchdog/scripts/watchdog_on.sh            # 켜기 (감지 전용. 설정 파일의 dry_run 값을 따름)
 src/sensor_watchdog/scripts/watchdog_on.sh --live     # 켜기 + 실제 재시작까지 (dry_run=false)
 src/sensor_watchdog/scripts/watchdog_on.sh my.yaml    # 다른 설정 파일로 켜기 (기본: ~/.config/sensor_watchdog/watchdog.yaml, 없으면 config/ipc.yaml)
-src/sensor_watchdog/scripts/watchdog_off.sh           # 끄기
+src/sensor_watchdog/scripts/watchdog_off.sh           # 끄기 (센서는 그대로 둠)
+src/sensor_watchdog/scripts/watchdog_off.sh --all     # 끄기 + 와치독이 재시작해서 띄운 센서 유닛까지 끄기
 
 # 3) 보기
 ros2 topic echo /diagnostics                           # 센서마다 state / faults / publishers
@@ -21,7 +22,7 @@ tail -f ~/.local/state/sensor_watchdog/events.csv      # 상태 변화·재시�
 python3 src/sensor_watchdog/test/bag_fault_test.py <로스백_폴더>   # 실차 백으로 13개 시나리오
 ```
 
-`watchdog_on.sh` 는 systemd 유닛(`sensor-watchdog.service`)이 설치돼 있으면 `systemctl --user start sensor-watchdog` 를, 없으면 바이너리를 직접 백그라운드로 띄웁니다. `watchdog_off.sh` 는 둘 다 끕니다. 센서 드라이버는 건드리지 않습니다. systemd 로 등록하는 절차는 [설치](#설치) 참고.
+`watchdog_on.sh` 는 systemd 유닛(`sensor-watchdog.service`)이 설치돼 있으면 `systemctl --user start sensor-watchdog` 를, 없으면 바이너리를 직접 백그라운드로 띄웁니다. `watchdog_off.sh` 는 둘 다 끕니다. 센서 드라이버는 건드리지 않습니다. `--all` 을 붙이면 와치독이 재시작해서 띄운 센서 유닛(`~/.local/state/sensor_watchdog/started_units` 에 적힌 것)까지 끕니다. 사람이 직접 띄운 유닛은 그 파일에 없으므로 그대로 둡니다. systemd 로 등록하는 절차는 [설치](#설치) 참고.
 
 ---
 
@@ -153,7 +154,7 @@ sensor_watchdog/
 │   └── sensor-watchdog.service
 ├── scripts/
 │   ├── watchdog_on.sh      와치독 켜기 (유닛이 있으면 유닛, 없으면 직접 실행)
-│   ├── watchdog_off.sh     와치독 끄기
+│   ├── watchdog_off.sh     와치독 끄기 (--all: 와치독이 띄운 센서 유닛까지)
 │   ├── bag_diag_check.py   백에서 "diag 만 봐도 잡혔을까" 대조
 │   ├── hz_ab_test.py       구독자 하나 더 붙을 때 Hz 영향 A/B 측정
 │   ├── env.bash.example    서비스가 source 할 ROS 환경 파일 틀
@@ -344,7 +345,8 @@ ssh -o BatchMode=yes orin 'whoami'           # 역시 재시작만 됨
 | 하고 싶은 것 | 명령 |
 |---|---|
 | 와치독 켜기 | `scripts/watchdog_on.sh` (유닛이 있으면 `systemctl --user start sensor-watchdog`, 없으면 직접 띄움. `--live` 면 dry_run 끔) |
-| 와치독 끄기 | `scripts/watchdog_off.sh` |
+| 와치독 끄기 | `scripts/watchdog_off.sh` (센서는 그대로) |
+| 와치독 + 와치독이 띄운 센서 끄기 | `scripts/watchdog_off.sh --all` (사람이 띄운 유닛은 안 건드림) |
 | 센서 켜기 | `systemctl --user start lidar` |
 | 센서 끄기 | `systemctl --user stop sensor-watchdog` 먼저, 그다음 `systemctl --user stop lidar` |
 | 카메라 켜고 끄기 | Orin 에서 `systemctl --user start cam` / `stop cam` |
@@ -482,6 +484,8 @@ values: fault, faults, state, publishers, node(unchecked/visible/missing/duplica
 ### 7. 기록
 
 `log_dir` 아래 `events.csv` 하나. 상태 변화, 행동 시작·종료, 복구까지 걸린 시간, 중복 정리, 게이트 우회. `log_max_mb`(기본 20 MB)를 넘으면 `.1` 백업 하나만 남기고 새로 시작합니다. 메시지별 원시 로그는 없습니다(구독을 안 하니까).
+
+같은 곳에 `started_units` 파일도 둡니다. 와치독이 service/power 행동으로 띄운 유닛 목록(한 줄에 `유닛<TAB>systemctl 명령 앞부분`)이며 `/diagnostics` 의 `started_by_watchdog` 와 항상 같습니다. 와치독이 그 유닛을 중복 정리로 끄거나 와치독이 새로 뜨면 비워집니다. `scripts/watchdog_off.sh --all` 이 이 파일을 읽어 와치독이 띄운 유닛만 끕니다.
 
 ### 8. 와치독 자체 감시
 

@@ -545,6 +545,11 @@ class Harness:
                 blocked = [s for s in self.relay_sensors
                            if self.first(s, lambda st, f: st == "BLOCKED_COMMON_CAUSE", after=at)]
                 self.expect(not blocked, f"같은 유닛인데 공통 원인으로 막힘: {blocked}")
+            # 재시작한 유닛은 started_units 에 적혀야 한다 (watchdog_off.sh --all 이 읽는 파일)
+            units = self.started_units()
+            self.expect(p[fs]["unit"] in units,
+                        f"started_units 에 {p[fs]['unit']} 가 없음: {units}")
+            self.expect(len(units) == 1, f"started_units 는 유닛 1개여야 하는데: {units}")
 
         elif sc == "duplicate":
             calls = self.systemctl_calls()
@@ -557,6 +562,8 @@ class Harness:
             self.expect(back is not None, f"{fs}: 중복 정리 뒤 HEALTHY 복귀 실패. 기록: {self.states_after(fs, at)[-6:]}")
             if dup and back:
                 self.notes.append(f"{fs}: 재시작 후 발행자 2개 → +{dup[0] - at:.1f}s DUPLICATE 감지 → stop 호출 → +{back[0] - at:.1f}s HEALTHY (발행자 1개)")
+            self.expect(not self.started_units(),
+                        f"와치독이 띄운 유닛을 stop 한 뒤엔 started_units 가 비어야 하는데: {self.started_units()}")
             self.expect(not [e for e in self.states_after(fs, at) if e[1] == "DUPLICATE_NOT_OURS"],
                         f"{fs}: 와치독이 띄운 유닛인데 DUPLICATE_NOT_OURS 로 분류됨")
         elif sc == "duplicate_foreign":
@@ -574,6 +581,14 @@ class Harness:
         if not self.use_fake:
             self.expect(not self.systemctl_calls(), "dry_run 인데 systemctl 이 호출됨")
         return self.report()
+
+    def started_units(self):
+        """와치독이 log_dir 에 적는 started_units 파일의 유닛 이름 목록 (없으면 [])."""
+        path = os.path.join(self.tmp, "started_units")
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as f:
+            return [line.split("\t")[0] for line in f.read().splitlines() if line.strip()]
 
     def systemctl_calls(self):
         path = os.path.join(self.tmp, "systemctl.log")

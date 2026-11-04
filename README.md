@@ -222,8 +222,11 @@ cp systemd/lidar.service systemd/rtk-gps.service systemd/sensor-watchdog.service
 source /opt/ros/humble/setup.bash
 source /home/nvidia/ros2_ws/install/setup.bash    # 드라이버 워크스페이스
 export ROS_DOMAIN_ID=101                           # 실차 도메인. 와치독과 센서 유닛 모두 이 파일을 읽으므로 같은 값이 된다
-# export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp       # 터미널에서 쓰던 값과 반드시 같게
+export CYCLONEDDS_URI=file:///home/nvidia/.cyclonedds.xml
 ```
+
+> **RMW 줄을 빼먹으면 안 됩니다.** 유닛은 `.bashrc` 를 읽지 않으므로 여기 없는 값은 ROS 기본값(Fast DDS)이 됩니다. 나머지 노드가 CycloneDDS 로 도는 차에서 라이다만 Fast DDS 로 뜨면 벤더 간 통신이 되어 포인트클라우드가 10 Hz → 2 Hz 로 떨어지고 드라이버 메모리가 수십 GB 까지 불어납니다 (실차에서 확인). 터미널에서 `printenv RMW_IMPLEMENTATION CYCLONEDDS_URI` 로 나온 값을 그대로 적으세요.
 
 **`~/.config/sensor_watchdog/watchdog.yaml`** — `config/ipc.yaml` 은 실차 bag(bag1512) 기준으로 라이다 4대(`/front_m1p`, `/rear_m1p`, `/left_bp`, `/right_bp` 의 `rslidar_points`), GPS(`/fix`), 게이트 설정이 채워져 있습니다. 단, 테스트 중이라 `gate_topic` 은 `""` 로 비워 두어 기어와 무관하게 재시작합니다. 상용화 전에 `/vehicle/status/gear_status` 로 되돌리면 P단에서만 재시작합니다. 남은 `CHANGE_ME` 는 카메라 토픽 하나이며, 카메라는 확인 전까지 `sensors` 목록에서 빠져 있습니다.
 
